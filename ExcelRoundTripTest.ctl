@@ -403,6 +403,15 @@ bool writeAndReadBack(string context, dyn_anytype rows, dyn_mapping &back)
 bool excelPre1970Test()
 {
   time t = makeTime(1960, 5, 1, 12, 30, 0, 250);
+
+  // Where CTRL time cannot go below 1970, makeTime returns time 0 and the
+  // round-trip below would pass without testing anything.
+  if (year(t) != 1960)
+  {
+    DebugTN("excelPre1970Test", "skipped: CTRL time cannot represent 1960", "makeTime returned", t);
+    return TRUE;
+  }
+
   dyn_mapping back;
 
   bool pass = writeAndReadBack("excelPre1970Test", makeDynAnytype(makeMapping("Time", t)), back)
@@ -622,11 +631,27 @@ bool excelTooManyColumnsTest()
 // (makeTime then returns a different year, which Excel can store).
 bool excelOutOfRangeTimeTest()
 {
-  time tooOld = makeTime(1850, 1, 1);
+  // makeTime rejects such years (returns time 0), so build them by
+  // arithmetic from valid times.
+  time tooOld = makeTime(1901, 1, 1);
 
-  if (year(tooOld) != 1850)
+  for (int i = 0; i < 5; i++)
   {
-    DebugTN("excelOutOfRangeTimeTest", "skipped: CTRL time cannot represent 1850", "makeTime returned", tooOld);
+    tooOld -= 31536000; // 365 days
+  }
+
+  time tooNew = makeTime(9999, 12, 31, 23, 59, 59);
+  tooNew += 2 * 86400;
+
+  dyn_time candidates;
+
+  if (year(tooOld) < 1900) dynAppend(candidates, tooOld);
+  if (year(tooNew) > 9999) dynAppend(candidates, tooNew);
+
+  if (dynlen(candidates) == 0)
+  {
+    DebugTN("excelOutOfRangeTimeTest", "skipped: CTRL time cannot represent a time outside 1900..9999",
+            "tooOld", tooOld, "tooNew", tooNew);
     return TRUE;
   }
 
@@ -634,16 +659,24 @@ bool excelOutOfRangeTimeTest()
 
   if (filename == "") return FALSE;
 
-  dyn_anytype rows;
-  dynAppend(rows, makeMapping("When", makeTime(2026, 1, 1)));
-  dynAppend(rows, makeMapping("When", tooOld));
+  bool pass = TRUE;
 
-  bool writeOk = excelWriteSheet(filename, "Data", rows);
-  dyn_errClass errors = getLastError();
-  string errText = dynlen(errors) > 0 ? getErrorText(errors[1]) : "";
+  for (int i = 1; i <= dynlen(candidates); i++)
+  {
+    dyn_anytype rows;
+    dynAppend(rows, makeMapping("When", makeTime(2026, 1, 1)));
+    dynAppend(rows, makeMapping("When", candidates[i]));
 
-  bool pass = !writeOk && strpos(errText, "row 2") >= 0 && strpos(errText, "When") >= 0;
-  DebugTN("excelOutOfRangeTimeTest", "writeOk", writeOk, "error", errText, "pass", pass);
+    bool writeOk = excelWriteSheet(filename, "Data", rows);
+    dyn_errClass errors = getLastError();
+    string errText = dynlen(errors) > 0 ? getErrorText(errors[1]) : "";
+
+    bool ok = !writeOk && strpos(errText, "row 2") >= 0 && strpos(errText, "When") >= 0;
+    DebugTN("excelOutOfRangeTimeTest", "time", candidates[i], "writeOk", writeOk, "error", errText, "ok", ok);
+    pass = pass && ok;
+  }
+
+  DebugTN("excelOutOfRangeTimeTest", "pass", pass);
   remove(filename);
   return pass;
 }
@@ -663,7 +696,9 @@ bool excelEmptySheetNameTest()
     return FALSE;
   }
 
-  bool pass = checkRows(excelReadSheet(filename, ""), t1, t2, "excelEmptySheetNameTest");
+  // Also with every optional argument, incl. skipEmptyRows = FALSE.
+  bool pass = checkRows(excelReadSheet(filename, ""), t1, t2, "excelEmptySheetNameTest")
+              && checkRows(excelReadSheet(filename, "", FALSE, TRUE, FALSE), t1, t2, "excelEmptySheetNameTest (all args)");
   DebugTN("excelEmptySheetNameTest", "pass", pass);
   remove(filename);
   return pass;

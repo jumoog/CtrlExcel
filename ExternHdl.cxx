@@ -19,8 +19,8 @@ using namespace OpenXLSX;
 static FunctionListRec fnList[] =
 {
   { DYNTEXT_VAR,       "excelGetSheetNames", "(string filename)",                                                                          false },
-  { DYNMAPPING_VAR,    "excelReadSheet",     "(string filename, string sheetName, bool skipHiddenRows = true, bool firstRowIsColumnNames = true)", false },
-  { MAPPING_VAR,       "excelReadFile",      "(string filename, bool skipHiddenRows = true, bool firstRowIsColumnNames = true)",                   false },
+  { DYNMAPPING_VAR,    "excelReadSheet",     "(string filename, string sheetName, bool skipHiddenRows = true, bool firstRowIsColumnNames = true, bool skipEmptyRows = true)", false },
+  { MAPPING_VAR,       "excelReadFile",      "(string filename, bool skipHiddenRows = true, bool firstRowIsColumnNames = true, bool skipEmptyRows = true)",                   false },
   { BIT_VAR,           "excelWriteSheet",    "(string filename, string sheetName, dyn_anytype data)",                                              false },
   { BIT_VAR,           "excelWriteFile",     "(string filename, mapping data)",                                                                    false },
 };
@@ -31,17 +31,20 @@ CTRL_EXTENSION(ExternHdl, fnList)
 
 namespace
 {
-  // Append an error the CTRL script can retrieve with getLastError().
+  // Append an error the CTRL script can retrieve with getLastError(). msg is
+  // UTF-8 (like everything from OpenXLSX) and converted to the project
+  // encoding here, so callers must not mix in project-encoded text.
   void reportError(CtrlThread *thread, const char *funcName,
                    const std::string &msg)
   {
     ErrClass err(ErrClass::PRIO_WARNING, ErrClass::ERR_CONTROL,
                  ErrClass::UNEXPECTEDSTATE, "CtrlExcelReader", funcName,
-                 msg.c_str());
+                 ExcelXlsxHelpers::fromUtf8(msg).c_str());
     thread->appendLastError(&err);
   }
 
-  // Report the exception currently being handled; call only from a catch block.
+  // Report the exception currently being handled; call only from a catch
+  // block. context is UTF-8.
   void reportCurrentException(CtrlThread *thread, const char *funcName,
                               const std::string &context = std::string())
   {
@@ -106,6 +109,24 @@ namespace
   TextVar projectText(const std::string &utf8)
   {
     return TextVar(ExcelXlsxHelpers::fromUtf8(utf8).c_str());
+  }
+
+  // Warn about a sheet name the project encoding cannot represent: the
+  // returned (converted) name will not find the sheet again.
+  void checkRepresentableSheetName(CtrlThread *thread, const char *funcName,
+                                   const std::string &utf8)
+  {
+    if ( !ExcelXlsxHelpers::isRepresentable(utf8) )
+      reportError(thread, funcName, "sheet name '" + utf8
+        + "' cannot be represented in the project encoding; it cannot be opened by the returned name");
+  }
+
+  void reportWarnings(CtrlThread *thread, const char *funcName,
+                      const std::string &context,
+                      const std::vector<std::string> &warnings)
+  {
+    for ( const auto &warning : warnings )
+      reportError(thread, funcName, context + ": " + warning);
   }
 
   // Write sheets to a new workbook at filename (UTF-8). The file is only
@@ -230,12 +251,15 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
         // Worksheets only: chartsheets cannot be read by excelReadSheet.
         auto names = doc.workbook().worksheetNames();
         for ( const auto &name : names )
+        {
+          checkRepresentableSheetName(param.thread, "excelGetSheetNames", name);
           dynTextResult.append(projectText(name));
+        }
         doc.close();
       }
       catch (...)
       {
-        reportCurrentException(param.thread, "excelGetSheetNames", filenameVar.getValue());
+        reportCurrentException(param.thread, "excelGetSheetNames", utf8Arg(filenameVar));
       }
 
       return &dynTextResult;
@@ -243,22 +267,23 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
 
     // -------------------------------------------------------------------------
     // excelReadSheet(string filename, string sheetName,
-    //                bool skipHiddenRows, bool firstRowIsColumnNames)
-    //   -> dyn_mapping
+    //                bool skipHiddenRows, bool firstRowIsColumnNames,
+    //                bool skipEmptyRows) -> dyn_mapping
     case F_excelReadSheet:
     {
       param.thread->clearLastError();
       dynMappingResult.reset(MAPPING_VAR);
 
-      if ( !hasNumArgs(2, 4, param) )
+      if ( !hasNumArgs(2, 5, param) )
         return &dynMappingResult;
 
       TextVar filenameVar, sheetnameVar;
-      BitVar skipHiddenVar(true), headerVar(true);
+      BitVar skipHiddenVar(true), headerVar(true), skipEmptyVar(true);
       if ( !evalArg(param.args->getFirst(), param.thread, filenameVar)
         || !evalArg(param.args->getNext(), param.thread, sheetnameVar)
         || !evalOptionalArg(param.args->getNext(), param.thread, skipHiddenVar)
-        || !evalOptionalArg(param.args->getNext(), param.thread, headerVar) )
+        || !evalOptionalArg(param.args->getNext(), param.thread, headerVar)
+        || !evalOptionalArg(param.args->getNext(), param.thread, skipEmptyVar) )
       {
         reportError(param.thread, "excelReadSheet", "argument could not be evaluated");
         return &dynMappingResult;
@@ -281,14 +306,18 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
         }
         auto wks = doc.workbook().worksheet(sheetname);
 
+        std::vector<std::string> warnings;
         ExcelXlsxHelpers::readSheetRows(wks, doc, dynMappingResult,
-                                        headerVar.isTrue(), skipHiddenVar.isTrue());
+                                        headerVar.isTrue(), skipHiddenVar.isTrue(),
+                                        skipEmptyVar.isTrue(), warnings);
+        reportWarnings(param.thread, "excelReadSheet",
+                       utf8Arg(filenameVar) + " [" + sheetname + "]", warnings);
         doc.close();
       }
       catch (...)
       {
         reportCurrentException(param.thread, "excelReadSheet",
-          std::string(filenameVar.getValue()) + " [" + sheetnameVar.getValue() + "]");
+          utf8Arg(filenameVar) + " [" + utf8Arg(sheetnameVar) + "]");
       }
 
       return &dynMappingResult;
@@ -296,20 +325,21 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
 
     // -------------------------------------------------------------------------
     // excelReadFile(string filename, bool skipHiddenRows,
-    //              bool firstRowIsColumnNames) -> mapping
+    //              bool firstRowIsColumnNames, bool skipEmptyRows) -> mapping
     case F_excelReadFile:
     {
       param.thread->clearLastError();
       mappingResult = MappingVar();
 
-      if ( !hasNumArgs(1, 3, param) )
+      if ( !hasNumArgs(1, 4, param) )
         return &mappingResult;
 
       TextVar filenameVar;
-      BitVar skipHiddenVar(true), headerVar(true);
+      BitVar skipHiddenVar(true), headerVar(true), skipEmptyVar(true);
       if ( !evalArg(param.args->getFirst(), param.thread, filenameVar)
         || !evalOptionalArg(param.args->getNext(), param.thread, skipHiddenVar)
-        || !evalOptionalArg(param.args->getNext(), param.thread, headerVar) )
+        || !evalOptionalArg(param.args->getNext(), param.thread, headerVar)
+        || !evalOptionalArg(param.args->getNext(), param.thread, skipEmptyVar) )
       {
         reportError(param.thread, "excelReadFile", "argument could not be evaluated");
         return &mappingResult;
@@ -330,15 +360,20 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
 
             DynVar sheetDyn;
             sheetDyn.reset(MAPPING_VAR);
+            std::vector<std::string> warnings;
             ExcelXlsxHelpers::readSheetRows(wks, doc, sheetDyn,
-                                            headerVar.isTrue(), skipHiddenVar.isTrue());
+                                            headerVar.isTrue(), skipHiddenVar.isTrue(),
+                                            skipEmptyVar.isTrue(), warnings);
+            reportWarnings(param.thread, "excelReadFile",
+                           utf8Arg(filenameVar) + " [" + sn + "]", warnings);
 
+            checkRepresentableSheetName(param.thread, "excelReadFile", sn);
             mappingResult.setAt(projectText(sn), sheetDyn);
           }
           catch (...)
           {
             reportCurrentException(param.thread, "excelReadFile",
-              std::string(filenameVar.getValue()) + " [" + sn + "]");
+              utf8Arg(filenameVar) + " [" + sn + "]");
           }
         }
 
@@ -346,7 +381,7 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       }
       catch (...)
       {
-        reportCurrentException(param.thread, "excelReadFile", filenameVar.getValue());
+        reportCurrentException(param.thread, "excelReadFile", utf8Arg(filenameVar));
       }
 
       return &mappingResult;

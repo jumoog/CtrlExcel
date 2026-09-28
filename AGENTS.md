@@ -41,14 +41,14 @@ There is no C++ test harness. `ExcelRoundTripTest.ctl` runs inside a WinCC OA pr
 - **Numbers**: OpenXLSX writes doubles with `%.17g` and types any numeric text without `.` as Integer, so whole-number floats read back as `int` (inherent, not a bug to fix). Two consequences are handled in `cellNumber()`: date detection must also run for Integer cells (date-only serials such as `46023`), and exponent text such as `1e+20` is parsed by `as_llong` as `1`, so values -9..9 are re-parsed from the raw XML (`rawNumberText()` via `XLCell::print`). Always go through `cellNumber()`, never `val.get<int64_t>()` directly.
 - **Integers**: values outside the 32-bit range must become `LongVar`, not a truncated `IntegerVar`.
 - **Encoding**: CTRL strings are in the project encoding (UTF-8 or e.g. ISO-8859-1); OpenXLSX and the file use UTF-8. Convert every filename, sheet name and text with `ExcelXlsxHelpers::toUtf8()` / `fromUtf8()` (WinCC OA's `UTF8Converter`). Build `std::filesystem` paths from the UTF-8 name with `std::filesystem::u8path`.
-- **Reading rows**: rows without any value are skipped, because `rowCount()` includes rows that only carry formatting.
+- **Reading rows**: rows without any value are skipped by default (`skipEmptyRows`), because `rowCount()` includes rows that only carry formatting. Uncached formulas are typed Integer 0 by OpenXLSX; `isUncachedFormula()` detects a missing/empty `<v>`. Non-fatal problems go into readSheetRows' `warnings` and are reported by the caller.
 
 ## CTRL extension conventions
 
 - `ExecuteParamRec` is nested in `BaseExternHdl`; helpers outside the class take `CtrlThread *`.
 - Every function starts with `param.thread->clearLastError()`, then `hasNumArgs(min, max, param)`.
 - Evaluate arguments with `evalArg` / `evalOptionalArg`: `evaluate()` may return `nullptr`.
-- Never swallow exceptions silently: use `reportError` / `reportCurrentException` so scripts see them via `getLastError()`. Include the file (and sheet) name in the context.
+- Never swallow exceptions silently: use `reportError` / `reportCurrentException` so scripts see them via `getLastError()`. Include the file (and sheet) name in the context. Messages are UTF-8 (`utf8Arg()` for CTRL arguments); `reportError` converts them to the project encoding, so never mix in project-encoded text.
 - Results are returned via function-local `static` variables, reset at the start of each call.
 - Keep `fnList` signatures in sync with the README.
 
