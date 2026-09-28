@@ -25,7 +25,7 @@ dyn_mapping excelReadSheet(string filename, string sheetName, bool skipHiddenRow
 
 Reads a sheet and returns each data row as a `mapping`.
 
-- **sheetName** — pass an empty string to read the first sheet.
+- **sheetName** — pass an empty string to read the first worksheet.
 - **skipHiddenRows** — optional, defaults to `TRUE`. When `TRUE`, hidden rows are omitted.
 - **firstRowIsColumnNames** — optional, defaults to `TRUE`. When `TRUE`, the first row supplies the mapping keys as strings. When `FALSE`, keys are 1-based column integers.
 
@@ -36,12 +36,14 @@ Cell values are automatically typed based on the Excel cell type:
 - Numeric integers → `int`, or `long` outside the 32-bit range
 - Numeric decimals → `float`. Excel does not distinguish integers from decimals, so a whole-number `float` such as `87.0` is stored as `87` and reads back as `int`.
 - Booleans → `bool`
-- Dates/times → `time` with milliseconds (Excel serial converted to WinCC OA time, treated as local time). Time-only values (serial below 1, e.g. `08:00`) are returned as numbers.
+- Dates/times → `time` with milliseconds (Excel serial converted to WinCC OA time, treated as local time). Time-only values (serial below 1, e.g. `08:00`) and elapsed-time formats such as `[h]:mm` are returned as numbers (days, as Excel stores them).
 - Strings → `string`
 - Error cells (e.g. a formula result `#DIV/0!` or `#N/A`) → the error code as `string`, so they are distinguishable from empty cells
-- Empty cells → `""`
+- Empty cells → `""`. Rows without any value (e.g. rows that only carry formatting) are skipped.
 
-Excel date serials carry no timezone. In the hour repeated when daylight saving time ends, a written time cannot be told apart from the same wall-clock time one hour earlier and may read back one hour off. Times the C runtime cannot convert (before 1970 on Windows, after the year 3000) use the local standard-time offset without daylight saving time, in both directions, so they still round-trip.
+Excel date serials carry no timezone. In the hour repeated when daylight saving time ends, a written time cannot be told apart from the same wall-clock time one hour earlier and may read back one hour off. Times the C runtime cannot convert (before 1970 on Windows, after the year 3000) use the local standard-time offset without daylight saving time, in both directions, so they still round-trip. Times outside Excel's range (before 1900-01-01 or after 9999-12-31) fail the write with an error naming the row and column.
+
+Texts are converted between the project's encoding (e.g. ISO-8859-1) and the UTF-8 used in `.xlsx` files, for cell values, sheet names and filenames.
 
 ```ctrl
 // Read the first sheet with default options
@@ -96,7 +98,7 @@ bool excelWriteSheet(string filename, string sheetName, dyn_anytype data)
 Writes a `dyn_anytype` (containing mappings) to a single-sheet `.xlsx` file. The keys of all rows, in order of first appearance, become the column headers; a row without a key gets an empty cell in that column.
 
 - An empty **sheetName** writes `Sheet1`. Sheet names must follow Excel's rules: at most 31 characters, none of `\ / ? * [ ] :`, no leading or trailing apostrophe, not `History`, and unique ignoring case.
-- Control characters other than tab, newline and carriage return are removed from texts (XML cannot store them). Bytes that are not valid UTF-8 are treated as ISO-8859-1 and converted, so projects running a Latin-1 codepage still produce valid files. A text longer than 32767 characters, Excel's cell limit, fails the write.
+- Characters XML cannot store as-is (control characters, carriage return) are written as Excel's `_xHHHH_` escapes and decoded on read, so texts round-trip exactly; escapes in files written by Excel (e.g. `_x000D_`) are decoded too. A text longer than 32767 characters, Excel's cell limit, fails the write.
 - More than 1048575 data rows or 16384 columns (Excel's sheet size) fail the write. Column widths follow the longest value, capped at Excel's maximum of 255.
 
 ```ctrl
@@ -141,7 +143,7 @@ bool ok = excelWriteFile("C:/data/output.xlsx", data);
 Every function clears and then fills the CTRL error list, so failures can be inspected with `getLastError()`:
 
 - Read functions return an empty result on failure (missing file, unknown sheet, corrupt workbook). `excelReadFile` still returns the sheets it could read and reports the ones it could not.
-- Write functions return `FALSE` on failure (file open in Excel, invalid sheet name, data that is not a `dyn_mapping` of mappings, text over the cell limit, data larger than a sheet). A failed write never modifies an existing file.
+- Write functions return `FALSE` on failure (file open in Excel, invalid sheet name, data that is not a `dyn_mapping` of mappings, text over the cell limit, time outside Excel's range, data larger than a sheet). A failed write never modifies an existing file.
 
 ```ctrl
 dyn_mapping rows = excelReadSheet("C:/data/report.xlsx", "Sheet1");

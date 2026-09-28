@@ -10,8 +10,10 @@
 #include <MixedVar.hxx>
 #include <TextVar.hxx>
 #include <TimeVar.hxx>
+#include <UTF8Converter.hxx>
 
 #include <cctype>
+#include <cerrno>
 #include <algorithm>
 #include <climits>
 #include <unordered_map>
@@ -42,6 +44,16 @@ namespace ExcelXlsxHelpers
 
     return current;
   }
+
+  std::string toUtf8(const char *projectText)
+  {
+    return std::string(UTF8Converter::toUTF8(CharString(projectText)).c_str());
+  }
+
+  CharString fromUtf8(const std::string &utf8)
+  {
+    return UTF8Converter::fromUTF8(CharString(utf8.c_str()));
+  }
 }
 
 namespace
@@ -54,6 +66,10 @@ namespace
   constexpr size_t EXCEL_MAX_ROWS = 1048576;
   constexpr size_t EXCEL_MAX_COLUMNS = 16384;
   constexpr float EXCEL_MAX_COLUMN_WIDTH = 255.0f;
+
+  // Excel's date range: serial 1 (1900-01-01) up to 9999-12-31.
+  constexpr double EXCEL_MIN_SERIAL = 1.0;
+  constexpr double EXCEL_MAX_SERIAL = 2958466.0; // exclusive
 
   // Excel serial day of 1970-01-01. Serials below 61 precede Excel's
   // fictitious 1900-02-29 and are shifted by one day.
@@ -145,12 +161,34 @@ namespace
     return n;
   }
 
-  // Text as valid XML 1.0 UTF-8, which Excel requires. Well-formed UTF-8 is
-  // copied; any other byte is taken as ISO-8859-1 (the usual non-UTF-8 WinCC
-  // OA codepage) and re-encoded. The noncharacters U+FFFE/U+FFFF are dropped,
-  // and so are control characters other than tab, LF and CR unless
-  // keepControls is set (sheet-name validation reports those instead).
-  std::string toXmlUtf8(const char *text, bool keepControls = false)
+  bool isHex(unsigned char c)
+  {
+    return isxdigit(c) != 0;
+  }
+
+  // Whether p starts an Excel escape sequence "_xHHHH_".
+  bool isExcelEscape(const unsigned char *p)
+  {
+    return p[0] == '_' && (p[1] == 'x' || p[1] == 'X')
+        && isHex(p[2]) && isHex(p[3]) && isHex(p[4]) && isHex(p[5]) && p[6] == '_';
+  }
+
+  void appendExcelEscape(std::string &out, unsigned int codeUnit)
+  {
+    char buf[8];
+    snprintf(buf, sizeof(buf), "_x%04X_", codeUnit);
+    out += buf;
+  }
+
+  // Text (UTF-8) as valid XML 1.0 UTF-8 for a cell, which Excel requires.
+  // Characters XML cannot hold (control characters other than tab and LF,
+  // CR, which XML parsers normalise to LF, and U+FFFE/U+FFFF) are written as
+  // Excel's "_xHHHH_" escapes, and a literal "_xHHHH_" in the text gets its
+  // '_' escaped, so everything round-trips through decodeExcelEscapes().
+  // Bytes that are not valid UTF-8 are taken as ISO-8859-1 as a last resort.
+  // For sheet names (cellText == false) nothing is escaped; checkSheetNames
+  // rejects control characters there instead.
+  std::string toXmlUtf8(const char *text, bool cellText = true)
   {
     std::string out;
     const unsigned char *p = reinterpret_cast<const unsigned char *>(text);
@@ -182,21 +220,104 @@ namespace
         continue;
       }
 
-      bool drop = (len == 1 && c < 0x20 && c != '\t' && c != '\n' && c != '\r' && !keepControls)
-               || (len == 3 && c == 0xEF && p[1] == 0xBF && p[2] >= 0xBE);
-      if (!drop)
-        out.append(reinterpret_cast<const char *>(p), len);
+      if (cellText)
+      {
+        if (len == 1 && c < 0x20 && c != '\t' && c != '\n')
+        {
+          appendExcelEscape(out, c);
+          ++p;
+          continue;
+        }
+        if (len == 3 && c == 0xEF && p[1] == 0xBF && p[2] >= 0xBE)
+        {
+          appendExcelEscape(out, 0xFFC0u | (p[2] & 0x3Fu)); // U+FFFE / U+FFFF
+          p += 3;
+          continue;
+        }
+        if (isExcelEscape(p))
+        {
+          out += "_x005F_"; // the '_' itself; "xHHHH_" follows as plain text
+          ++p;
+          continue;
+        }
+      }
+
+      out.append(reinterpret_cast<const char *>(p), len);
       p += len;
     }
     return out;
   }
 
-  // Cell text via toXmlUtf8; width receives the length in characters. False
-  // if the text exceeds Excel's per-cell limit.
-  bool toCellText(const char *text, std::string &out, size_t &width)
+  // Decode Excel's "_xHHHH_" escapes (UTF-16 code units) in cell text, which
+  // OpenXLSX leaves as literal text. Surrogate pairs are combined.
+  std::string decodeExcelEscapes(const std::string &text)
   {
-    out = toXmlUtf8(text);
-    width = utf16Length(out);
+    if (text.find("_x") == std::string::npos && text.find("_X") == std::string::npos)
+      return text;
+
+    std::string out;
+    const unsigned char *p = reinterpret_cast<const unsigned char *>(text.c_str());
+    while (*p)
+    {
+      if (!isExcelEscape(p))
+      {
+        out.push_back(static_cast<char>(*p++));
+        continue;
+      }
+
+      char32_t cp = static_cast<char32_t>(strtoul(std::string(reinterpret_cast<const char *>(p + 2), 4).c_str(), nullptr, 16));
+      p += 7;
+
+      if (cp >= 0xD800 && cp <= 0xDBFF && isExcelEscape(p))
+      {
+        char32_t low = static_cast<char32_t>(strtoul(std::string(reinterpret_cast<const char *>(p + 2), 4).c_str(), nullptr, 16));
+        if (low >= 0xDC00 && low <= 0xDFFF)
+        {
+          cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+          p += 7;
+        }
+      }
+      if (cp >= 0xD800 && cp <= 0xDFFF)
+        cp = 0xFFFD; // unpaired surrogate
+
+      if (cp < 0x80)
+        out.push_back(static_cast<char>(cp));
+      else if (cp < 0x800)
+      {
+        out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+      }
+      else if (cp < 0x10000)
+      {
+        out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+      }
+      else
+      {
+        out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+      }
+    }
+    return out;
+  }
+
+  // Cell text read from the file: escapes decoded, converted to the project
+  // encoding.
+  TextVar cellTextVar(const std::string &utf8)
+  {
+    return TextVar(ExcelXlsxHelpers::fromUtf8(decodeExcelEscapes(utf8)).c_str());
+  }
+
+  // Cell text from project-encoded text via toXmlUtf8; width receives the
+  // length in characters. False if the text exceeds Excel's per-cell limit.
+  bool toCellText(const char *projectText, std::string &out, size_t &width)
+  {
+    std::string utf8 = ExcelXlsxHelpers::toUtf8(projectText);
+    width = utf16Length(utf8);
+    out = toXmlUtf8(utf8.c_str());
     return width <= EXCEL_MAX_CELL_CHARS;
   }
 
@@ -273,19 +394,22 @@ namespace
   //----------------------------------------------------------------------------
 
   // Built-in Excel number-format IDs that represent dates/times (ECMA-376).
+  // 46 ("[h]:mm:ss") is an elapsed duration, not a point in time.
   bool isBuiltinDateFormatId(unsigned int id)
   {
     return (id >= 14 && id <= 22)
         || (id >= 27 && id <= 36)
-        || (id >= 45 && id <= 47);
+        || id == 45 || id == 47;
   }
 
   // Scan a custom format-code string for date/time tokens (y m d h s)
   // while ignoring quoted literals, escaped chars and bracketed sections.
+  // Elapsed-time formats ([h]:mm, [mm]:ss, [s]) are durations, not dates.
   bool isDateFormatCode(const std::string &code)
   {
     bool inQuote = false;
     bool inBracket = false;
+    std::string bracket;
 
     for (size_t i = 0; i < code.size(); i++)
     {
@@ -294,9 +418,16 @@ namespace
       if (c == '"') { inQuote = !inQuote; continue; }
       if (inQuote) continue;
       if (c == '\\') { i++; continue; } // skip escaped char
-      if (c == '[') { inBracket = true; continue; }
-      if (c == ']') { inBracket = false; continue; }
-      if (inBracket) continue;
+      if (c == '[') { inBracket = true; bracket.clear(); continue; }
+      if (c == ']')
+      {
+        inBracket = false;
+        if (!bracket.empty()
+         && bracket.find_first_not_of("hHmMsS") == std::string::npos)
+          return false;
+        continue;
+      }
+      if (inBracket) { bracket.push_back(c); continue; }
 
       char lower = static_cast<char>(tolower(static_cast<unsigned char>(c)));
       if (lower == 'y' || lower == 'm' || lower == 'd'
@@ -387,10 +518,13 @@ namespace
     double value = 0.0;
   };
 
-  // Raw numeric text of the cell's <v> element.
+  // Raw text of the cell's <v> element (OpenXLSX offers no other access).
   std::string rawNumberText(const XLCell &cell)
   {
-    std::ostringstream xml;
+    // Reused: constructing a stream per cell dominated the cost.
+    static thread_local std::ostringstream xml;
+    xml.str(std::string());
+    xml.clear();
     cell.print(xml);
     const std::string node = xml.str();
     size_t begin = node.find("<v>");
@@ -415,13 +549,23 @@ namespace
     out.value = static_cast<double>(out.integer);
     out.isInteger = true;
 
-    // OpenXLSX parses Integer text with as_llong, which stops at an exponent:
-    // "1E+20" becomes 1. Exponent notation always has a one-digit mantissa,
-    // so only results -9..9 can be affected; re-parse those from the XML.
-    if (out.integer >= -9 && out.integer <= 9)
+    // OpenXLSX parses Integer text with as_llong, which stops at an exponent
+    // ("1E+20" becomes 1) and clamps values beyond int64 to its limits.
+    // Exponent notation always has a one-digit mantissa, so only results
+    // -9..9 and the two limits need re-parsing from the XML.
+    bool maybeExponent = out.integer >= -9 && out.integer <= 9;
+    bool maybeOverflow = out.integer == INT64_MAX || out.integer == INT64_MIN;
+    if (maybeExponent || maybeOverflow)
     {
       std::string text = rawNumberText(cell);
-      if (text.find_first_of("eE") != std::string::npos)
+      bool reparse = text.find_first_of("eE") != std::string::npos;
+      if (!reparse && maybeOverflow)
+      {
+        errno = 0;
+        strtoll(text.c_str(), nullptr, 10);
+        reparse = errno == ERANGE;
+      }
+      if (reparse)
       {
         out.value = strtod(text.c_str(), nullptr);
         out.isInteger = false;
@@ -474,7 +618,7 @@ namespace
     switch (val.type())
     {
       case XLValueType::String:
-        return val.get<std::string>();
+        return decodeExcelEscapes(val.get<std::string>());
       case XLValueType::Boolean:
         return val.get<bool>() ? "TRUE" : "FALSE";
       default:
@@ -482,8 +626,9 @@ namespace
     }
   }
 
-  // Set a mapping value using the cell type reported by OpenXLSX.
-  void setTypedCellCached(MappingVar &row, const Variable &key,
+  // Set a mapping value using the cell type reported by OpenXLSX. Returns
+  // false for an empty cell.
+  bool setTypedCellCached(MappingVar &row, const Variable &key,
                           XLCell &cell,
                           const XLStyles &styles,
                           std::unordered_map<XLStyleIndex, bool> &dateCache)
@@ -499,36 +644,35 @@ namespace
         PVSSshort milli = 0;
         time_t sec = serialToLocalTime(num.value, tm, milli);
         row.setAt(key, TimeVar(sec, milli));
-        return;
       }
-
-      if (num.isInteger)
+      else if (num.isInteger)
       {
         if (num.integer >= INT_MIN && num.integer <= INT_MAX)
           row.setAt(key, IntegerVar(static_cast<int>(num.integer)));
         else
           row.setAt(key, LongVar(num.integer));
-        return;
       }
-
-      double intpart;
-      if (modf(num.value, &intpart) == 0.0
-       && intpart >= INT_MIN && intpart <= INT_MAX)
-        row.setAt(key, IntegerVar(static_cast<int>(intpart)));
       else
-        row.setAt(key, FloatVar(num.value));
-      return;
+      {
+        double intpart;
+        if (modf(num.value, &intpart) == 0.0
+         && intpart >= INT_MIN && intpart <= INT_MAX)
+          row.setAt(key, IntegerVar(static_cast<int>(intpart)));
+        else
+          row.setAt(key, FloatVar(num.value));
+      }
+      return true;
     }
 
     switch (val.type())
     {
       case XLValueType::Boolean:
         row.setAt(key, BitVar(val.get<bool>()));
-        return;
+        return true;
 
       case XLValueType::String:
-        row.setAt(key, TextVar(val.get<std::string>().c_str()));
-        return;
+        row.setAt(key, cellTextVar(val.get<std::string>()));
+        return true;
 
       case XLValueType::Error:
       {
@@ -536,12 +680,12 @@ namespace
         // distinguishable from an empty cell.
         std::string code = rawNumberText(cell);
         row.setAt(key, TextVar(code.empty() ? "#ERROR" : code.c_str()));
-        return;
+        return true;
       }
 
       default: // Empty
         row.setAt(key, TextVar(""));
-        return;
+        return false;
     }
   }
 
@@ -584,9 +728,11 @@ namespace
   }
 
   // Write a single WinCC OA Variable to an OpenXLSX cell. width receives the
-  // displayed length for column sizing. False if text exceeds Excel's limit.
+  // displayed length for column sizing. False with a reason in problem if the
+  // value cannot be stored in Excel.
   bool writeTypedCell(XLCell &cell, const Variable *val,
-                      XLStyleIndex dateTimeFmtIdx, size_t &width)
+                      XLStyleIndex dateTimeFmtIdx, size_t &width,
+                      std::string &problem)
   {
     width = 0;
     if (!val)
@@ -621,8 +767,14 @@ namespace
       case TIME_VAR:
       {
         const TimeVar *timeVal = static_cast<const TimeVar *>(val);
-        cell.value() = XLDateTime(localTimeToSerial(
-          static_cast<time_t>(timeVal->getSeconds()), timeVal->getMilli()));
+        double serial = localTimeToSerial(
+          static_cast<time_t>(timeVal->getSeconds()), timeVal->getMilli());
+        if (serial < EXCEL_MIN_SERIAL || serial >= EXCEL_MAX_SERIAL)
+        {
+          problem = "time outside Excel's date range (1900-01-01 to 9999-12-31)";
+          return false;
+        }
+        cell.value() = XLDateTime(serial);
         cell.setCellFormat(dateTimeFmtIdx);
         width = 19; // "YYYY-MM-DD hh:mm:ss"
         return true;
@@ -631,7 +783,10 @@ namespace
       {
         std::string text;
         if (!toCellText(static_cast<const TextVar *>(val)->getValue(), text, width))
+        {
+          problem = "text exceeds " + std::to_string(EXCEL_MAX_CELL_CHARS) + " characters";
           return false;
+        }
         cell.value() = text;
         return true;
       }
@@ -645,14 +800,17 @@ namespace
           return true;
         }
 
-        return writeTypedCell(cell, inner, dateTimeFmtIdx, width);
+        return writeTypedCell(cell, inner, dateTimeFmtIdx, width, problem);
       }
       default:
       {
         CharString str = val->formatValue(CharString());
         std::string text;
         if (!toCellText(str.c_str(), text, width))
+        {
+          problem = "text exceeds " + std::to_string(EXCEL_MAX_CELL_CHARS) + " characters";
           return false;
+        }
         cell.value() = text;
         return true;
       }
@@ -701,7 +859,7 @@ namespace ExcelXlsxHelpers
           std::string unique = name;
           for (int n = 2; !seen.insert(unique).second; ++n)
             unique = name + "_" + std::to_string(n);
-          keys.emplace_back(new TextVar(unique.c_str()));
+          keys.emplace_back(new TextVar(fromUtf8(unique).c_str()));
         }
         ++c;
       }
@@ -723,9 +881,14 @@ namespace ExcelXlsxHelpers
       // cells(colCount) yields exactly colCount cells, one per key.
       MappingVar rowMap;
       size_t c = 0;
+      bool hasValue = false;
       for (auto& cell : xlRow.cells(colCount))
-        setTypedCellCached(rowMap, *keys[c++], cell, styles, dateCache);
-      result.append(rowMap);
+        hasValue = setTypedCellCached(rowMap, *keys[c++], cell, styles, dateCache) || hasValue;
+
+      // rowCount() includes rows that only carry formatting (fill, height);
+      // rows without any value are not records.
+      if (hasValue)
+        result.append(rowMap);
     }
   }
 
@@ -800,11 +963,13 @@ namespace ExcelXlsxHelpers
 
     // Max displayed width per column, starting with the header.
     std::vector<size_t> maxWidths(numCols);
+    std::vector<std::string> headerNames(numCols);
 
     // Write column headers in row 1 (bold)
     for (size_t c = 0; c < numCols; c++)
     {
       CharString name = keys[c]->formatValue(CharString());
+      headerNames[c] = name.c_str();
       std::string text;
       if (!toCellText(name.c_str(), text, maxWidths[c]))
       {
@@ -829,11 +994,11 @@ namespace ExcelXlsxHelpers
         );
 
         size_t width = 0;
-        if (!writeTypedCell(cell, cellVal, dateTimeFmtIdx, width))
+        std::string problem;
+        if (!writeTypedCell(cell, cellVal, dateTimeFmtIdx, width, problem))
         {
-          error = "row " + std::to_string(r + 1) + ", column "
-                + std::to_string(c + 1) + ": text exceeds "
-                + std::to_string(EXCEL_MAX_CELL_CHARS) + " characters";
+          error = "row " + std::to_string(r + 1) + ", column '"
+                + headerNames[c] + "': " + problem;
           return false;
         }
         if (width > maxWidths[c])
@@ -854,7 +1019,7 @@ namespace ExcelXlsxHelpers
     std::unordered_set<std::u32string> seen;
     for (std::string &name : names)
     {
-      name = toXmlUtf8(name.c_str(), true);
+      name = toXmlUtf8(name.c_str(), false);
 
       std::string quoted = "sheet name '" + name + "'";
       if (name.empty())

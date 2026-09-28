@@ -5,6 +5,8 @@
 #include <DynVar.hxx>
 #include <MixedVar.hxx>
 
+#include <CharString.hxx>
+
 #include <string>
 #include <vector>
 
@@ -26,6 +28,11 @@ namespace ExcelXlsxHelpers
 {
   const Variable *unwrapAnyOrMixed(const Variable *val);
 
+  // Conversion between the project's text encoding (what CTRL strings hold)
+  // and UTF-8 (what OpenXLSX and the file use). No-ops in UTF-8 projects.
+  std::string toUtf8(const char *projectText);
+  CharString fromUtf8(const std::string &utf8);
+
   void readSheetRows(OpenXLSX::XLWorksheet &wks, OpenXLSX::XLDocument &doc,
                      DynVar &result, bool useHeaders, bool skipHidden);
 
@@ -34,7 +41,7 @@ namespace ExcelXlsxHelpers
   bool writeSheetData(OpenXLSX::XLWorksheet &wks, const DynVar &data,
                       OpenXLSX::XLDocument &doc, std::string &error);
 
-  // Converts the names to valid UTF-8 in place. Returns an empty string if
+  // names are UTF-8 (see toUtf8); converts them to valid UTF-8 in place. Returns an empty string if
   // Excel accepts every name, otherwise the first problem found.
   std::string checkSheetNames(std::vector<std::string> &names);
 }

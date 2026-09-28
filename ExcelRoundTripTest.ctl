@@ -35,6 +35,8 @@ void main()
   excelLargeFloatTest();
   excelWideTextTest();
   excelTooManyColumnsTest();
+  excelOutOfRangeTimeTest();
+  excelEmptySheetNameTest();
   // Last: passes a dyn where the signature declares a mapping.
   excelWriteFileWrongTypeTest();
 }
@@ -441,16 +443,17 @@ bool excelSheetNameValidationTest()
   return pass;
 }
 
-// Control characters XML cannot represent are dropped; tab and newline stay.
+// Control characters and CR, which XML cannot hold or normalises, are stored
+// as Excel's _xHHHH_ escapes and round-trip exactly, as does a literal escape.
 bool excelControlCharsTest()
 {
   string text;
-  sprintf(text, "a%cb\tc\nd", 1);
+  sprintf(text, "a%cb\tc\r\nd _x0041_", 1);
   dyn_mapping back;
 
   bool pass = writeAndReadBack("excelControlCharsTest", makeDynAnytype(makeMapping("Text", text)), back)
               && dynlen(back) == 1
-              && back[1]["Text"] == "ab\tc\nd";
+              && back[1]["Text"] == text;
 
   if (!pass)
   {
@@ -610,6 +613,58 @@ bool excelTooManyColumnsTest()
 
   bool pass = !writeOk && errCount > 0;
   DebugTN("excelTooManyColumnsTest", "writeOk", writeOk, "errors", errCount, "pass", pass);
+  remove(filename);
+  return pass;
+}
+
+// Times before 1900 cannot be stored in Excel; the write fails with an error
+// naming the row and column. Skipped where CTRL's time type cannot hold 1850
+// (makeTime then returns a different year, which Excel can store).
+bool excelOutOfRangeTimeTest()
+{
+  time tooOld = makeTime(1850, 1, 1);
+
+  if (year(tooOld) != 1850)
+  {
+    DebugTN("excelOutOfRangeTimeTest", "skipped: CTRL time cannot represent 1850", "makeTime returned", tooOld);
+    return TRUE;
+  }
+
+  string filename = getTempFile("excelOutOfRangeTimeTest");
+
+  if (filename == "") return FALSE;
+
+  dyn_anytype rows;
+  dynAppend(rows, makeMapping("When", makeTime(2026, 1, 1)));
+  dynAppend(rows, makeMapping("When", tooOld));
+
+  bool writeOk = excelWriteSheet(filename, "Data", rows);
+  dyn_errClass errors = getLastError();
+  string errText = dynlen(errors) > 0 ? getErrorText(errors[1]) : "";
+
+  bool pass = !writeOk && strpos(errText, "row 2") >= 0 && strpos(errText, "When") >= 0;
+  DebugTN("excelOutOfRangeTimeTest", "writeOk", writeOk, "error", errText, "pass", pass);
+  remove(filename);
+  return pass;
+}
+
+// An empty sheet name reads the first worksheet.
+bool excelEmptySheetNameTest()
+{
+  string filename = getTempFile("excelEmptySheetNameTest");
+
+  if (filename == "") return FALSE;
+
+  time t1, t2;
+
+  if (!excelWriteSheet(filename, "People", buildTestRows(t1, t2)))
+  {
+    DebugTN("excelEmptySheetNameTest: excelWriteSheet failed", filename, getLastError());
+    return FALSE;
+  }
+
+  bool pass = checkRows(excelReadSheet(filename, ""), t1, t2, "excelEmptySheetNameTest");
+  DebugTN("excelEmptySheetNameTest", "pass", pass);
   remove(filename);
   return pass;
 }

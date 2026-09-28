@@ -9,6 +9,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -80,7 +81,7 @@ namespace
   }
 
   // False if the file exists but cannot be opened for writing, e.g. because
-  // Excel holds it open. CTRL strings are UTF-8, hence u8path.
+  // Excel holds it open. filename is UTF-8, hence u8path.
   bool isWritableOrMissing(const std::string &filename)
   {
     std::filesystem::path filePath = std::filesystem::u8path(filename);
@@ -91,11 +92,25 @@ namespace
     return testWrite.is_open();
   }
 
-  // Sheet name and its rows (a dyn of mappings, possibly anytype-wrapped).
+  // Sheet name (UTF-8) and its rows (a dyn of mappings, possibly
+  // anytype-wrapped).
   using SheetList = std::vector<std::pair<std::string, const Variable *>>;
 
-  // Write sheets to a new workbook at filename. The file is only saved when
-  // every sheet is valid, so a failed write leaves an existing file untouched.
+  // Filename or sheet name from CTRL, converted for OpenXLSX (UTF-8).
+  std::string utf8Arg(const TextVar &var)
+  {
+    return ExcelXlsxHelpers::toUtf8(var.getValue());
+  }
+
+  // Name from the file, converted for CTRL (project encoding).
+  TextVar projectText(const std::string &utf8)
+  {
+    return TextVar(ExcelXlsxHelpers::fromUtf8(utf8).c_str());
+  }
+
+  // Write sheets to a new workbook at filename (UTF-8). The file is only
+  // saved when every sheet is valid, so a failed write leaves an existing
+  // file untouched.
   bool writeWorkbook(CtrlThread *thread, const char *funcName,
                      const std::string &filename, const SheetList &sheets)
   {
@@ -211,11 +226,11 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       try
       {
         XLDocument doc;
-        doc.open(filenameVar.getValue());
+        doc.open(utf8Arg(filenameVar));
         // Worksheets only: chartsheets cannot be read by excelReadSheet.
         auto names = doc.workbook().worksheetNames();
         for ( const auto &name : names )
-          dynTextResult.append(TextVar(name.c_str()));
+          dynTextResult.append(projectText(name));
         doc.close();
       }
       catch (...)
@@ -252,12 +267,19 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       try
       {
         XLDocument doc;
-        doc.open(filenameVar.getValue());
+        doc.open(utf8Arg(filenameVar));
 
-        const char *sheetname = sheetnameVar.getValue();
-        auto wks = (*sheetname)
-          ? doc.workbook().worksheet(std::string(sheetname))
-          : doc.workbook().worksheet(1);
+        // An empty name means the first worksheet; worksheet(1) would be the
+        // first sheet of any kind and fail for a chart sheet.
+        std::string sheetname = utf8Arg(sheetnameVar);
+        if ( sheetname.empty() )
+        {
+          auto names = doc.workbook().worksheetNames();
+          if ( names.empty() )
+            throw std::runtime_error("workbook has no worksheets");
+          sheetname = names.front();
+        }
+        auto wks = doc.workbook().worksheet(sheetname);
 
         ExcelXlsxHelpers::readSheetRows(wks, doc, dynMappingResult,
                                         headerVar.isTrue(), skipHiddenVar.isTrue());
@@ -296,7 +318,7 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       try
       {
         XLDocument doc;
-        doc.open(filenameVar.getValue());
+        doc.open(utf8Arg(filenameVar));
 
         auto sheetNames = doc.workbook().worksheetNames();
         for ( const auto &sn : sheetNames )
@@ -311,7 +333,7 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
             ExcelXlsxHelpers::readSheetRows(wks, doc, sheetDyn,
                                             headerVar.isTrue(), skipHiddenVar.isTrue());
 
-            mappingResult.setAt(TextVar(sn.c_str()), sheetDyn);
+            mappingResult.setAt(projectText(sn), sheetDyn);
           }
           catch (...)
           {
@@ -354,11 +376,11 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       CtrlExpr *dataArg = param.args->getNext();
       const Variable *dataPtr = dataArg ? dataArg->evaluate(param.thread) : nullptr;
 
-      const char *sheetname = sheetnameVar.getValue();
-      SheetList sheets{ { (*sheetname) ? sheetname : "Sheet1", dataPtr } };
+      std::string sheetname = utf8Arg(sheetnameVar);
+      SheetList sheets{ { sheetname.empty() ? "Sheet1" : sheetname, dataPtr } };
 
       writeResult = BitVar(writeWorkbook(param.thread, "excelWriteSheet",
-                                         filenameVar.getValue(), sheets));
+                                         utf8Arg(filenameVar), sheets));
       return &writeResult;
     }
 
@@ -405,11 +427,11 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       for ( unsigned int s = 0; s < numSheets; s++ )
       {
         CharString sheetName = dataVar.getKey(s)->formatValue(CharString());
-        sheets.emplace_back(sheetName.c_str(), dataVar.getValue(s));
+        sheets.emplace_back(ExcelXlsxHelpers::toUtf8(sheetName.c_str()), dataVar.getValue(s));
       }
 
       writeResult = BitVar(writeWorkbook(param.thread, "excelWriteFile",
-                                         filenameVar.getValue(), sheets));
+                                         utf8Arg(filenameVar), sheets));
       return &writeResult;
     }
 
