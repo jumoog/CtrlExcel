@@ -11,6 +11,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -350,6 +351,11 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
         XLDocument doc;
         doc.open(utf8Arg(filenameVar));
 
+        // Keys in the project encoding; names that collapse to the same text
+        // (characters the codepage lacks) get a suffix instead of overwriting
+        // each other, as header keys do.
+        std::unordered_set<std::string> usedKeys;
+
         auto sheetNames = doc.workbook().worksheetNames();
         for ( const auto &sn : sheetNames )
         {
@@ -368,7 +374,16 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
                            utf8Arg(filenameVar) + " [" + sn + "]", warnings);
 
             checkRepresentableSheetName(param.thread, "excelReadFile", sn);
-            mappingResult.setAt(projectText(sn), sheetDyn);
+
+            std::string baseKey = ExcelXlsxHelpers::fromUtf8(sn).c_str();
+            std::string key = baseKey;
+            for ( int n = 2; !usedKeys.insert(key).second; ++n )
+              key = baseKey + "_" + std::to_string(n);
+            if ( key != baseKey )
+              reportError(param.thread, "excelReadFile", "sheet '" + sn + "' is returned under key '"
+                + ExcelXlsxHelpers::toUtf8(key.c_str()) + "' because its name collides after encoding conversion");
+
+            mappingResult.setAt(TextVar(key.c_str()), sheetDyn);
           }
           catch (...)
           {
