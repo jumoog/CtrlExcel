@@ -5,7 +5,6 @@
 #include <DynVar.hxx>
 #include <MappingVar.hxx>
 
-#include <OpenXLSX.hpp>
 #include <filesystem>
 #include <fstream>
 #include <string>

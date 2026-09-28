@@ -19,5 +19,9 @@ endif()
 add_ctrlext(${TARGET} ${SOURCES})
 
 # --- OpenXLSX (Excel reader / writer) ----------------------------------------
+# OpenXLSXConfig.cmake does not call find_dependency for its link deps
+find_package(pugixml CONFIG REQUIRED)
+find_package(miniz CONFIG REQUIRED)
+find_package(Boost CONFIG REQUIRED COMPONENTS nowide)
 find_package(OpenXLSX CONFIG REQUIRED)
 target_link_libraries(${TARGET} OpenXLSX::OpenXLSX)

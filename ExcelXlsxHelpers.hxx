@@ -5,7 +5,11 @@
 #include <DynVar.hxx>
 #include <MixedVar.hxx>
 
+// WinCC OA's win32.h typedefs ssize_t as int; OpenXLSX redefines it as a
+// 64-bit alias. Rename OpenXLSX's alias (no effect on mangled names).
+#define ssize_t OpenXLSX_ssize_t
 #include <OpenXLSX.hpp>
+#undef ssize_t
 
 class Variable;
 
