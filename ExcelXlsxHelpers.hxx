@@ -29,13 +29,14 @@ namespace ExcelXlsxHelpers
   void readSheetRows(OpenXLSX::XLWorksheet &wks, OpenXLSX::XLDocument &doc,
                      DynVar &result, bool useHeaders, bool skipHidden);
 
-  // Returns false with a reason in error if a row is not a mapping or a text
-  // exceeds Excel's cell limit. Rows are validated before anything is written.
+  // Returns false with a reason in error if a row is not a mapping, the data
+  // exceeds Excel's sheet size, or a text exceeds Excel's cell limit.
   bool writeSheetData(OpenXLSX::XLWorksheet &wks, const DynVar &data,
                       OpenXLSX::XLDocument &doc, std::string &error);
 
-  // Empty if Excel accepts every name, otherwise the first problem found.
-  std::string checkSheetNames(const std::vector<std::string> &names);
+  // Converts the names to valid UTF-8 in place. Returns an empty string if
+  // Excel accepts every name, otherwise the first problem found.
+  std::string checkSheetNames(std::vector<std::string> &names);
 }
 
 #endif

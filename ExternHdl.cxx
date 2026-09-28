@@ -101,6 +101,7 @@ namespace
   {
     // OpenXLSX only rejects exact duplicates; names Excel refuses would give
     // a file Excel reports as corrupt.
+    // checkSheetNames also converts the names to valid UTF-8; use its result.
     std::vector<std::string> names;
     names.reserve(sheets.size());
     for ( const auto &sheet : sheets )
@@ -143,7 +144,7 @@ namespace
       auto wb = doc.workbook();
       for ( size_t s = 0; s < sheets.size(); s++ )
       {
-        const std::string &sheetName = sheets[s].first;
+        const std::string &sheetName = names[s];
         if ( s == 0 )
           wb.worksheet(1).setName(sheetName);
         else

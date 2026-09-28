@@ -37,7 +37,9 @@ Cell values are automatically typed based on the Excel cell type:
 - Numeric decimals → `float`. Excel does not distinguish integers from decimals, so a whole-number `float` such as `87.0` is stored as `87` and reads back as `int`.
 - Booleans → `bool`
 - Dates/times → `time` with milliseconds (Excel serial converted to WinCC OA time, treated as local time). Time-only values (serial below 1, e.g. `08:00`) are returned as numbers.
-- Strings and everything else → `string`
+- Strings → `string`
+- Error cells (e.g. a formula result `#DIV/0!` or `#N/A`) → the error code as `string`, so they are distinguishable from empty cells
+- Empty cells → `""`
 
 Excel date serials carry no timezone. In the hour repeated when daylight saving time ends, a written time cannot be told apart from the same wall-clock time one hour earlier and may read back one hour off. Times the C runtime cannot convert (before 1970 on Windows, after the year 3000) use the local standard-time offset without daylight saving time, in both directions, so they still round-trip.
 
@@ -94,7 +96,8 @@ bool excelWriteSheet(string filename, string sheetName, dyn_anytype data)
 Writes a `dyn_anytype` (containing mappings) to a single-sheet `.xlsx` file. The keys of all rows, in order of first appearance, become the column headers; a row without a key gets an empty cell in that column.
 
 - An empty **sheetName** writes `Sheet1`. Sheet names must follow Excel's rules: at most 31 characters, none of `\ / ? * [ ] :`, no leading or trailing apostrophe, not `History`, and unique ignoring case.
-- Control characters other than tab, newline and carriage return are removed from texts (XML cannot store them). A text longer than 32767 characters, Excel's cell limit, fails the write.
+- Control characters other than tab, newline and carriage return are removed from texts (XML cannot store them). Bytes that are not valid UTF-8 are treated as ISO-8859-1 and converted, so projects running a Latin-1 codepage still produce valid files. A text longer than 32767 characters, Excel's cell limit, fails the write.
+- More than 1048575 data rows or 16384 columns (Excel's sheet size) fail the write. Column widths follow the longest value, capped at Excel's maximum of 255.
 
 ```ctrl
 dyn_mapping rows;
@@ -138,7 +141,7 @@ bool ok = excelWriteFile("C:/data/output.xlsx", data);
 Every function clears and then fills the CTRL error list, so failures can be inspected with `getLastError()`:
 
 - Read functions return an empty result on failure (missing file, unknown sheet, corrupt workbook). `excelReadFile` still returns the sheets it could read and reports the ones it could not.
-- Write functions return `FALSE` on failure (file open in Excel, invalid sheet name, data that is not a `dyn_mapping` of mappings, text over the cell limit). A failed write never modifies an existing file.
+- Write functions return `FALSE` on failure (file open in Excel, invalid sheet name, data that is not a `dyn_mapping` of mappings, text over the cell limit, data larger than a sheet). A failed write never modifies an existing file.
 
 ```ctrl
 dyn_mapping rows = excelReadSheet("C:/data/report.xlsx", "Sheet1");

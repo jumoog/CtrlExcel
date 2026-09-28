@@ -31,6 +31,10 @@ void main()
   excelControlCharsTest();
   excelTextTooLongTest();
   excelUnionKeysTest();
+  excelMidnightDateTest();
+  excelLargeFloatTest();
+  excelWideTextTest();
+  excelTooManyColumnsTest();
   // Last: passes a dyn where the signature declares a mapping.
   excelWriteFileWrongTypeTest();
 }
@@ -422,15 +426,17 @@ bool excelSheetNameValidationTest()
 
   dyn_anytype rows = makeDynAnytype(makeMapping("A", 1));
   mapping sameIgnoringCase = makeMapping("Data", rows, "data", rows);
+  mapping sameIgnoringUmlautCase = makeMapping("Übersicht", rows, "übersicht", rows);
 
-  bool slashRejected = !excelWriteSheet(filename, "2026/09", rows) && dynlen(getLastError()) > 0;
-  bool longRejected  = !excelWriteSheet(filename, "abcdefghijklmnopqrstuvwxyz123456", rows) && dynlen(getLastError()) > 0;
-  bool caseRejected  = !excelWriteFile(filename, sameIgnoringCase) && dynlen(getLastError()) > 0;
-  bool validAccepted = excelWriteSheet(filename, "Data 2026-09", rows);
+  bool slashRejected  = !excelWriteSheet(filename, "2026/09", rows) && dynlen(getLastError()) > 0;
+  bool longRejected   = !excelWriteSheet(filename, "abcdefghijklmnopqrstuvwxyz123456", rows) && dynlen(getLastError()) > 0;
+  bool caseRejected   = !excelWriteFile(filename, sameIgnoringCase) && dynlen(getLastError()) > 0;
+  bool umlautRejected = !excelWriteFile(filename, sameIgnoringUmlautCase) && dynlen(getLastError()) > 0;
+  bool validAccepted  = excelWriteSheet(filename, "Data 2026-09", rows);
 
-  bool pass = slashRejected && longRejected && caseRejected && validAccepted;
+  bool pass = slashRejected && longRejected && caseRejected && umlautRejected && validAccepted;
   DebugTN("excelSheetNameValidationTest", "slash", slashRejected, "long", longRejected,
-          "case", caseRejected, "valid", validAccepted, "pass", pass);
+          "case", caseRejected, "umlautCase", umlautRejected, "valid", validAccepted, "pass", pass);
   remove(filename);
   return pass;
 }
@@ -516,6 +522,94 @@ bool excelWriteFileWrongTypeTest()
 
   bool pass = !writeOk && errCount > 0 && !isfile(filename);
   DebugTN("excelWriteFileWrongTypeTest", "writeOk", writeOk, "errors", errCount, "pass", pass);
+  remove(filename);
+  return pass;
+}
+
+// A time at exactly midnight has a whole-number serial, which OpenXLSX types
+// as integer; it must still come back as a time, not an int.
+bool excelMidnightDateTest()
+{
+  time t = makeTime(2026, 1, 1);
+  dyn_mapping back;
+
+  bool pass = writeAndReadBack("excelMidnightDateTest", makeDynAnytype(makeMapping("Date", t)), back)
+              && dynlen(back) == 1
+              && getType(back[1]["Date"]) == TIME_VAR
+              && back[1]["Date"] == t;
+
+  if (!pass)
+  {
+    DebugTN("excelMidnightDateTest: mismatch — read-back data", back, "expected", t);
+  }
+
+  DebugTN("excelMidnightDateTest", "pass", pass);
+  return pass;
+}
+
+// Large floats are stored in exponent notation ("1e+20"); OpenXLSX's integer
+// parsing would read that as 1.
+bool excelLargeFloatTest()
+{
+  float big = 1e20;
+  float negative = -3e18;
+  dyn_mapping back;
+
+  bool pass = writeAndReadBack("excelLargeFloatTest", makeDynAnytype(makeMapping("Big", big, "Negative", negative)), back)
+              && dynlen(back) == 1
+              && back[1]["Big"] == big
+              && back[1]["Negative"] == negative;
+
+  if (!pass)
+  {
+    DebugTN("excelLargeFloatTest: mismatch — read-back data", back);
+  }
+
+  DebugTN("excelLargeFloatTest", "pass", pass);
+  return pass;
+}
+
+// Long texts round-trip; the column width is capped at Excel's maximum of 255
+// (checked by opening the file in Excel, not here).
+bool excelWideTextTest()
+{
+  string text = "0123456789";
+
+  while (strlen(text) < 5000)
+  {
+    text += text;
+  }
+
+  dyn_mapping back;
+
+  bool pass = writeAndReadBack("excelWideTextTest", makeDynAnytype(makeMapping("Text", text)), back)
+              && dynlen(back) == 1
+              && back[1]["Text"] == text;
+
+  DebugTN("excelWideTextTest", "length", strlen(text), "pass", pass);
+  return pass;
+}
+
+// More columns than Excel's 16384 must fail the write instead of producing
+// a corrupt file.
+bool excelTooManyColumnsTest()
+{
+  string filename = getTempFile("excelTooManyColumnsTest");
+
+  if (filename == "") return FALSE;
+
+  mapping row;
+
+  for (int i = 1; i <= 16385; i++)
+  {
+    row[i] = i;
+  }
+
+  bool writeOk = excelWriteSheet(filename, "Data", makeDynAnytype(row));
+  int errCount = dynlen(getLastError());
+
+  bool pass = !writeOk && errCount > 0;
+  DebugTN("excelTooManyColumnsTest", "writeOk", writeOk, "errors", errCount, "pass", pass);
   remove(filename);
   return pass;
 }
