@@ -19,6 +19,10 @@ int g_passedTests;
 dyn_string g_failedTests;
 dyn_string g_skippedTests;
 
+// excelAsyncDoesNotBlockTest: ticks counted by a parallel CTRL thread.
+int g_ticks;
+bool g_ticking;
+
 //--------------------------------------------------------------------------------
 /**
 */
@@ -42,6 +46,8 @@ void main()
   recordTest("excelEmptySheetNameTest", excelEmptySheetNameTest());
   recordTest("excelEmptyWriteFileTest", excelEmptyWriteFileTest());
   recordTest("excelFixtureTest", excelFixtureTest());
+  recordTest("excelAsyncRoundTripTest", excelAsyncRoundTripTest());
+  recordTest("excelAsyncDoesNotBlockTest", excelAsyncDoesNotBlockTest());
   // Last: passes a dyn where the signature declares a mapping.
   recordTest("excelWriteFileWrongTypeTest", excelWriteFileWrongTypeTest());
 
@@ -726,6 +732,118 @@ bool excelEmptyWriteFileTest()
   bool pass = writeOk && exists && dynlen(sheets) == 1 && sheets[1] == "Sheet1"
               && dynlen(excelReadSheet(filename, "Sheet1")) == 0;
   DebugTN("excelEmptyWriteFileTest", "writeOk", writeOk, "exists", exists, "sheets", sheets, "pass", pass);
+  remove(filename);
+  return pass;
+}
+
+// The *Async variants deliver through reference parameters once the call
+// returns; errors arrive in getLastError() as for the blocking functions.
+bool excelAsyncRoundTripTest()
+{
+  string filename = getTempFile("excelAsyncRoundTripTest");
+  string filename2 = getTempFile("excelAsyncRoundTripTest2");
+
+  if (filename == "" || filename2 == "") return FALSE;
+
+  dyn_string failed;
+  time t1, t2;
+  dyn_anytype rows = buildTestRows(t1, t2);
+
+  bool ok;
+  if (excelWriteSheetAsync(filename, "People", rows, ok) != 0 || !ok)
+    dynAppend(failed, "excelWriteSheetAsync");
+
+  dyn_string names;
+  if (excelGetSheetNamesAsync(filename, names) != 0 || dynlen(names) != 1 || names[1] != "People")
+    dynAppend(failed, "excelGetSheetNamesAsync");
+
+  dyn_mapping back;
+  if (excelReadSheetAsync(filename, "People", back) != 0
+      || !checkRows(back, t1, t2, "excelAsyncRoundTripTest (excelReadSheetAsync)"))
+    dynAppend(failed, "excelReadSheetAsync");
+
+  mapping sheets;
+  if (excelReadFileAsync(filename, sheets) != 0 || !mappingHasKey(sheets, "People")
+      || !checkRows(sheets["People"], t1, t2, "excelAsyncRoundTripTest (excelReadFileAsync)"))
+    dynAppend(failed, "excelReadFileAsync");
+
+  bool ok2;
+  if (excelWriteFileAsync(filename2, makeMapping("People", rows), ok2) != 0 || !ok2
+      || !checkRows(excelReadSheet(filename2, "People"), t1, t2, "excelAsyncRoundTripTest (excelWriteFileAsync)"))
+    dynAppend(failed, "excelWriteFileAsync");
+
+  // Errors: a missing file yields no rows and an error after the call.
+  remove(filename2);
+  dyn_mapping missing;
+  int started = excelReadSheetAsync(filename2, "People", missing);
+  dyn_errClass asyncErrors = getLastError();
+  if (started != 0 || dynlen(missing) != 0 || dynlen(asyncErrors) == 0)
+  {
+    dynAppend(failed, "error delivery");
+    DebugTN("excelAsyncRoundTripTest: error delivery", "started", started,
+            "rows", dynlen(missing), "errors", asyncErrors);
+  }
+
+  bool pass = dynlen(failed) == 0;
+  DebugTN("excelAsyncRoundTripTest", "failed", failed, "pass", pass);
+  remove(filename);
+  remove(filename2);
+  return pass;
+}
+
+void tickThread()
+{
+  while (g_ticking)
+  {
+    g_ticks++;
+    delay(0, 10);
+  }
+}
+
+// While an *Async read of a large sheet runs, other CTRL threads keep
+// running (a blocking read would freeze the whole manager).
+bool excelAsyncDoesNotBlockTest()
+{
+  string filename = getTempFile("excelAsyncDoesNotBlockTest");
+
+  if (filename == "") return FALSE;
+
+  dyn_anytype rows;
+
+  for (int i = 1; i <= 20000; i++)
+  {
+    dynAppend(rows, makeMapping("Id", i, "Name", "row " + i, "Value", i * 1.5, "Flag", i % 2 == 0));
+  }
+
+  if (!excelWriteSheet(filename, "Big", rows))
+  {
+    DebugTN("excelAsyncDoesNotBlockTest: excelWriteSheet failed", getLastError());
+    remove(filename);
+    return FALSE;
+  }
+
+  g_ticks = 0;
+  g_ticking = TRUE;
+  int tid = startThread("tickThread");
+  delay(0, 50);
+
+  int ticksBefore = g_ticks;
+  time start = getCurrentTime();
+  dyn_mapping back;
+  int started = excelReadSheetAsync(filename, "Big", back);
+  float seconds = getCurrentTime() - start;
+  int ticksDuring = g_ticks - ticksBefore;
+
+  g_ticking = FALSE;
+  delay(0, 50);
+
+  // Expect roughly one tick per 10 ms of reading; require a clear majority
+  // of that so a slow machine does not fail the test.
+  int expected = seconds * 100;
+  bool pass = started == 0 && dynlen(back) == 20000 && back[20000]["Id"] == 20000
+              && ticksDuring >= expected / 2 && ticksDuring >= 2;
+  DebugTN("excelAsyncDoesNotBlockTest", "read seconds", seconds, "ticks during read", ticksDuring,
+          "rows", dynlen(back), "pass", pass);
   remove(filename);
   return pass;
 }

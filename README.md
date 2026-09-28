@@ -139,9 +139,36 @@ data["Sheet1"] = rows;
 bool ok = excelWriteFile("C:/data/output.xlsx", data);
 ```
 
+### Non-blocking variants (`...Async`)
+
+CTRL extension functions run on the CTRL manager's thread, so while the functions above read or write a large file, **every script in that manager stops**. The `...Async` variants do the work on a background thread instead: only the calling script waits, all other scripts of the manager keep running.
+
+```ctrl
+int excelGetSheetNamesAsync(string filename, dyn_string &names)
+int excelReadSheetAsync(string filename, string sheetName, dyn_mapping &rows, bool skipHiddenRows = TRUE, bool firstRowIsColumnNames = TRUE, bool skipEmptyRows = TRUE)
+int excelReadFileAsync(string filename, mapping &sheets, bool skipHiddenRows = TRUE, bool firstRowIsColumnNames = TRUE, bool skipEmptyRows = TRUE)
+int excelWriteSheetAsync(string filename, string sheetName, dyn_anytype data, bool &ok)
+int excelWriteFileAsync(string filename, mapping data, bool &ok)
+```
+
+They behave like the blocking functions, except that the result is delivered through the reference parameter (like `dpGet`). The return value is `0` if the call was accepted and `-1` for invalid arguments; the outcome of the operation is in the reference parameter and in `getLastError()` once the call returns.
+
+```ctrl
+dyn_mapping rows;
+excelReadSheetAsync("C:/data/big_report.xlsx", "Sheet1", rows);  // other scripts keep running
+dyn_errClass err = getLastError();  // right away: any other call (even dynlen) clears it
+if (dynlen(err) > 0)
+  DebugTN("read failed", err);
+
+bool ok;
+excelWriteSheetAsync("C:/data/out.xlsx", "Data", rows, ok);
+```
+
+The data passed to the write variants is copied when the call starts, so the script may change its variables while the write runs.
+
 ## Error handling
 
-Every function clears and then fills the CTRL error list, so failures can be inspected with `getLastError()`:
+Every function clears and then fills the CTRL error list, so failures can be inspected with `getLastError()`. As for every CTRL function, read it immediately after the call: any other function call in between (even `dynlen`) replaces the list.
 
 - Read functions return an empty result on failure (missing file, unknown sheet, corrupt workbook). `excelReadFile` still returns the sheets it could read and reports the ones it could not.
 - Write functions return `FALSE` on failure (file open in Excel, invalid sheet name, data that is not a `dyn_mapping` of mappings, text over the cell limit, data larger than a sheet). A failed write never modifies an existing file.
