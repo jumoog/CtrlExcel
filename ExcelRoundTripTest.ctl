@@ -26,6 +26,13 @@ void main()
   excelReadErrorReportedTest();
   excelLongValueTest();
   excelEmptyHeaderTest();
+  excelPre1970Test();
+  excelSheetNameValidationTest();
+  excelControlCharsTest();
+  excelTextTooLongTest();
+  excelUnionKeysTest();
+  // Last: passes a dyn where the signature declares a mapping.
+  excelWriteFileWrongTypeTest();
 }
 
 // Returns a temporary filename, or "" on failure.
@@ -80,7 +87,7 @@ bool checkRows(dyn_mapping rows, time t1, time t2, string context = "checkRows")
   }
 
   dyn_string missingKeys;
-  dyn_string keysToCheck = makeDynString("Name", "Age", "Active", "Time");
+  dyn_string keysToCheck = makeDynString("Name", "Age", "Score", "Active", "Time");
 
   for (int row = 1; row <= 2; row++)
   {
@@ -99,8 +106,12 @@ bool checkRows(dyn_mapping rows, time t1, time t2, string context = "checkRows")
     return false;
   }
 
+  // Excel has no int/float distinction: 87.0 is stored as "87" and comes
+  // back as int, 95.5 as float.
   bool pass = rows[1]["Name"]   == "Alice"
               && rows[1]["Age"]    == 30
+              && getType(rows[1]["Score"]) == FLOAT_VAR && rows[1]["Score"] == 95.5
+              && getType(rows[2]["Score"]) == INT_VAR   && rows[2]["Score"] == 87
               && rows[1]["Active"] == TRUE
               && rows[1]["Time"]   == t1
               && rows[2]["Name"]   == "Bob"
@@ -354,6 +365,157 @@ bool excelEmptyHeaderTest(string filename = "")
   }
 
   DebugTN("excelEmptyHeaderTest", "file", filename, "pass", pass);
+  remove(filename);
+  return pass;
+}
+
+// Writes rows to a temp file with excelWriteSheet and reads them back.
+// Returns FALSE (and logs) if the write fails.
+bool writeAndReadBack(string context, dyn_anytype rows, dyn_mapping &back)
+{
+  string filename = getTempFile(context);
+
+  if (filename == "") return FALSE;
+
+  bool ok = excelWriteSheet(filename, "Data", rows);
+
+  if (!ok)
+  {
+    DebugTN(context + ": excelWriteSheet failed", filename, getLastError());
+  }
+  else
+  {
+    back = excelReadSheet(filename, "Data");
+  }
+
+  remove(filename);
+  return ok;
+}
+
+// Times before 1970 are outside MSVC's mktime/localtime range and must still
+// round-trip exactly.
+bool excelPre1970Test()
+{
+  time t = makeTime(1960, 5, 1, 12, 30, 0, 250);
+  dyn_mapping back;
+
+  bool pass = writeAndReadBack("excelPre1970Test", makeDynAnytype(makeMapping("Time", t)), back)
+              && dynlen(back) == 1
+              && back[1]["Time"] == t;
+
+  if (!pass)
+  {
+    DebugTN("excelPre1970Test: mismatch — read-back data", back, "expected", t);
+  }
+
+  DebugTN("excelPre1970Test", "pass", pass);
+  return pass;
+}
+
+// Sheet names Excel rejects must fail the write with an error instead of
+// producing a corrupt workbook.
+bool excelSheetNameValidationTest()
+{
+  string filename = getTempFile("excelSheetNameValidationTest");
+
+  if (filename == "") return FALSE;
+
+  dyn_anytype rows = makeDynAnytype(makeMapping("A", 1));
+  mapping sameIgnoringCase = makeMapping("Data", rows, "data", rows);
+
+  bool slashRejected = !excelWriteSheet(filename, "2026/09", rows) && dynlen(getLastError()) > 0;
+  bool longRejected  = !excelWriteSheet(filename, "abcdefghijklmnopqrstuvwxyz123456", rows) && dynlen(getLastError()) > 0;
+  bool caseRejected  = !excelWriteFile(filename, sameIgnoringCase) && dynlen(getLastError()) > 0;
+  bool validAccepted = excelWriteSheet(filename, "Data 2026-09", rows);
+
+  bool pass = slashRejected && longRejected && caseRejected && validAccepted;
+  DebugTN("excelSheetNameValidationTest", "slash", slashRejected, "long", longRejected,
+          "case", caseRejected, "valid", validAccepted, "pass", pass);
+  remove(filename);
+  return pass;
+}
+
+// Control characters XML cannot represent are dropped; tab and newline stay.
+bool excelControlCharsTest()
+{
+  string text;
+  sprintf(text, "a%cb\tc\nd", 1);
+  dyn_mapping back;
+
+  bool pass = writeAndReadBack("excelControlCharsTest", makeDynAnytype(makeMapping("Text", text)), back)
+              && dynlen(back) == 1
+              && back[1]["Text"] == "ab\tc\nd";
+
+  if (!pass)
+  {
+    DebugTN("excelControlCharsTest: mismatch — read-back data", back);
+  }
+
+  DebugTN("excelControlCharsTest", "pass", pass);
+  return pass;
+}
+
+// Text beyond Excel's 32767-character cell limit fails the write.
+bool excelTextTooLongTest()
+{
+  string filename = getTempFile("excelTextTooLongTest");
+
+  if (filename == "") return FALSE;
+
+  string text = "x";
+
+  while (strlen(text) <= 32767)
+  {
+    text += text;
+  }
+
+  bool writeOk = excelWriteSheet(filename, "Data", makeDynAnytype(makeMapping("Text", text)));
+  int errCount = dynlen(getLastError());
+
+  bool pass = !writeOk && errCount > 0;
+  DebugTN("excelTextTooLongTest", "length", strlen(text), "writeOk", writeOk, "errors", errCount, "pass", pass);
+  remove(filename);
+  return pass;
+}
+
+// Keys that only appear in later rows still become columns.
+bool excelUnionKeysTest()
+{
+  dyn_anytype rows;
+  dynAppend(rows, makeMapping("Name", "Alice"));
+  dynAppend(rows, makeMapping("Name", "Bob", "Comment", "late key"));
+  dyn_mapping back;
+
+  bool pass = writeAndReadBack("excelUnionKeysTest", rows, back)
+              && dynlen(back) == 2
+              && mappingHasKey(back[1], "Comment") && back[1]["Comment"] == ""
+              && back[2]["Comment"] == "late key";
+
+  if (!pass)
+  {
+    DebugTN("excelUnionKeysTest: mismatch — read-back data", back);
+  }
+
+  DebugTN("excelUnionKeysTest", "pass", pass);
+  return pass;
+}
+
+// excelWriteFile with rows instead of a sheet mapping must fail, not return
+// TRUE without writing.
+bool excelWriteFileWrongTypeTest()
+{
+  string filename = getTempFile("excelWriteFileWrongTypeTest");
+
+  if (filename == "") return FALSE;
+
+  remove(filename);
+
+  dyn_anytype rows = makeDynAnytype(makeMapping("A", 1));
+  bool writeOk = excelWriteFile(filename, rows);
+  int errCount = dynlen(getLastError());
+
+  bool pass = !writeOk && errCount > 0 && !isfile(filename);
+  DebugTN("excelWriteFileWrongTypeTest", "writeOk", writeOk, "errors", errCount, "pass", pass);
   remove(filename);
   return pass;
 }

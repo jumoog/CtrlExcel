@@ -99,6 +99,20 @@ namespace
   bool writeWorkbook(CtrlThread *thread, const char *funcName,
                      const std::string &filename, const SheetList &sheets)
   {
+    // OpenXLSX only rejects exact duplicates; names Excel refuses would give
+    // a file Excel reports as corrupt.
+    std::vector<std::string> names;
+    names.reserve(sheets.size());
+    for ( const auto &sheet : sheets )
+      names.push_back(sheet.first);
+
+    std::string nameProblem = ExcelXlsxHelpers::checkSheetNames(names);
+    if ( !nameProblem.empty() )
+    {
+      reportError(thread, funcName, nameProblem);
+      return false;
+    }
+
     std::vector<const DynVar *> sheetRows;
     sheetRows.reserve(sheets.size());
     for ( const auto &sheet : sheets )
@@ -136,9 +150,10 @@ namespace
           wb.addWorksheet(sheetName);
 
         auto wks = wb.worksheet(sheetName);
-        if ( !ExcelXlsxHelpers::writeSheetData(wks, *sheetRows[s], doc) )
+        std::string error;
+        if ( !ExcelXlsxHelpers::writeSheetData(wks, *sheetRows[s], doc, error) )
         {
-          reportError(thread, funcName, sheetName + ": every row must be a mapping");
+          reportError(thread, funcName, sheetName + ": " + error);
           return false;
         }
       }
@@ -196,7 +211,8 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       {
         XLDocument doc;
         doc.open(filenameVar.getValue());
-        auto names = doc.workbook().sheetNames();
+        // Worksheets only: chartsheets cannot be read by excelReadSheet.
+        auto names = doc.workbook().worksheetNames();
         for ( const auto &name : names )
           dynTextResult.append(TextVar(name.c_str()));
         doc.close();
@@ -356,14 +372,26 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
         return &writeResult;
 
       TextVar filenameVar;
-      MappingVar dataVar;
-      if ( !evalArg(param.args->getFirst(), param.thread, filenameVar)
-        || !evalArg(param.args->getNext(), param.thread, dataVar) )
+      if ( !evalArg(param.args->getFirst(), param.thread, filenameVar) )
       {
         reportError(param.thread, "excelWriteFile", "argument could not be evaluated");
         return &writeResult;
       }
 
+      // Checked instead of copied into a MappingVar: that conversion turns
+      // any other type (e.g. a dyn_mapping meant for excelWriteSheet) into an
+      // empty mapping, which would "succeed" without writing anything.
+      CtrlExpr *dataArg = param.args->getNext();
+      const Variable *dataPtr = ExcelXlsxHelpers::unwrapAnyOrMixed(
+        dataArg ? dataArg->evaluate(param.thread) : nullptr);
+      if ( !dataPtr || dataPtr->isA() != MAPPING_VAR )
+      {
+        reportError(param.thread, "excelWriteFile",
+          "data must be a mapping of sheet name to dyn_mapping");
+        return &writeResult;
+      }
+
+      const MappingVar &dataVar = *static_cast<const MappingVar *>(dataPtr);
       unsigned int numSheets = dataVar.getNumberOfItems();
       if ( numSheets == 0 )
       {

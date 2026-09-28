@@ -32,12 +32,13 @@ There is no C++ test harness. `ExcelRoundTripTest.ctl` runs inside a WinCC OA pr
 
 ## Known pitfalls
 
-- **`ssize_t` clash**: WinCC OA's `winnt/win32.h` typedefs `ssize_t` as `int`; OpenXLSX redefines it as 64-bit. Include OpenXLSX only through `ExcelXlsxHelpers.hxx`, which renames it via `#define ssize_t OpenXLSX_ssize_t`. Never `#include <OpenXLSX.hpp>` directly.
+- **`ssize_t` clash**: WinCC OA's `winnt/win32.h` typedefs `ssize_t` as `int`; OpenXLSX redefines it as 64-bit. Include OpenXLSX only through `ExcelXlsxHelpers.hxx`, which renames it via `#define ssize_t OpenXLSX_ssize_t` (Windows only; on Linux there is no clash and the macro could rename glibc's typedef). Never `#include <OpenXLSX.hpp>` directly.
 - **OpenXLSX CMake config** does not `find_dependency` its link deps; `CMakeLists.txt` must `find_package` pugixml, miniz and Boost (nowide) before OpenXLSX.
 - **`XLDocument::create()`** builds in a temp archive; the target file is only written by `save()`. `writeWorkbook` relies on this: validate everything first, and skip `save()` on failure so an existing file is never clobbered.
-- **Dates**: `XLDateTime::tm()` truncates to whole seconds, and `XLDateTime(serial)` throws for serial < 1. Use `serialToLocalTime()` (rounds the whole serial to ms once) and `isDateValue()` (excludes serial < 1). Excel serials are local wall-clock time without a timezone; the DST fall-back hour is inherently ambiguous (documented in README).
+- **Dates**: never convert via `XLDateTime::tm()` (truncates to whole seconds) or `XLDateTime(std::tm)`. `serialToLocalTime()` / `localTimeToSerial()` use pure calendar arithmetic (`daysFromCivil`, Excel's fictitious 1900-02-29 handled in `excelDayToUnixDay`), and use `mktime`/`localtime` only for the UTC offset. MSVC's versions fail before 1970 and after 3000, so both directions then use `fallbackUtcOffset()`; keep the two directions symmetric. `XLDateTime(serial)` throws for serial < 1, so `isDateValue()` excludes those. The DST fall-back hour is inherently ambiguous (documented in README).
 - **Header keys** (`readSheetRows`): text for non-empty headers, repeated names suffixed `_2`, `_3`…, empty headers fall back to the 1-based column number as `int`. Numeric and date headers go through `headerText()`; never `get<std::string>()` on a non-string cell (it throws).
-- **Writing**: look up row values with the first row's original key `Variable`s, not stringified `TextVar`s, or non-text keys (e.g. int column keys) miss.
+- **Writing**: columns are the union of all rows' keys. Look up values with the original key `Variable`s, not stringified `TextVar`s, or non-text keys (e.g. int column keys) miss. Texts go through `toCellText()` (drops XML-invalid control characters, enforces the 32767-character limit); sheet names through `checkSheetNames()`, because OpenXLSX only rejects exact duplicates.
+- **Numbers**: OpenXLSX writes doubles with `%.17g` and classifies a value without `.` as integer, so whole-number floats read back as `int`. This is inherent, not a bug to fix.
 - **Integers**: values outside the 32-bit range must become `LongVar`, not a truncated `IntegerVar`.
 - **Filenames** from CTRL are UTF-8; build `std::filesystem` paths with `std::filesystem::u8path`.
 
