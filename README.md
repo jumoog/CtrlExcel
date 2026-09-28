@@ -29,13 +29,17 @@ Reads a sheet and returns each data row as a `mapping`.
 - **skipHiddenRows** — optional, defaults to `TRUE`. When `TRUE`, hidden rows are omitted.
 - **firstRowIsColumnNames** — optional, defaults to `TRUE`. When `TRUE`, the first row supplies the mapping keys as strings. When `FALSE`, keys are 1-based column integers.
 
+Header cells become string keys: numbers are written without decimals (`2024`), dates as `YYYY-MM-DD` (plus ` HH:MM:SS` when they have a time part). An empty header cell falls back to its 1-based column number (`int` key). A repeated header gets a suffix (`Value`, `Value_2`, `Value_3`) so no column is overwritten.
+
 Cell values are automatically typed based on the Excel cell type:
 
-- Numeric integers → `int`
+- Numeric integers → `int`, or `long` outside the 32-bit range
 - Numeric decimals → `float`
 - Booleans → `bool`
-- Dates/times → `time` (Excel serial converted to WinCC OA time, treated as local time)
+- Dates/times → `time` with milliseconds (Excel serial converted to WinCC OA time, treated as local time). Time-only values (serial below 1, e.g. `08:00`) are returned as numbers.
 - Strings and everything else → `string`
+
+Excel date serials carry no timezone. In the hour repeated when daylight saving time ends, a written time cannot be told apart from the same wall-clock time one hour earlier and may read back one hour off.
 
 ```ctrl
 // Read the first sheet with default options
@@ -124,6 +128,20 @@ dynAppend(rows, row);
 mapping data;
 data["Sheet1"] = rows;
 bool ok = excelWriteFile("C:/data/output.xlsx", data);
+```
+
+## Error handling
+
+Every function clears and then fills the CTRL error list, so failures can be inspected with `getLastError()`:
+
+- Read functions return an empty result on failure (missing file, unknown sheet, corrupt workbook). `excelReadFile` still returns the sheets it could read and reports the ones it could not.
+- Write functions return `FALSE` on failure (file open in Excel, data that is not a `dyn_mapping` of mappings). A failed write never modifies an existing file.
+
+```ctrl
+dyn_mapping rows = excelReadSheet("C:/data/report.xlsx", "Sheet1");
+dyn_errClass err = getLastError();
+if (dynlen(err) > 0)
+  DebugTN("excelReadSheet failed", err);
 ```
 
 ## Build

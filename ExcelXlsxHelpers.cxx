@@ -14,9 +14,12 @@
 #include <cctype>
 #include <climits>
 #include <unordered_map>
+#include <unordered_set>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -42,6 +45,7 @@ namespace ExcelXlsxHelpers
 namespace
 {
   constexpr uint32_t EXCEL_FMT_DATE_TIME = 22;
+  constexpr long long DAY_MILLIS = 24LL * 60LL * 60LL * 1000LL;
 
   bool toLocalCalendarTime(time_t sec, std::tm &outTm)
   {
@@ -124,9 +128,117 @@ namespace
   // Read helpers
   //----------------------------------------------------------------------------
 
-  // Set a mapping value using the cell type reported by OpenXLSX, using a
-  // pre-fetched XLStyles reference and a caller-owned format-index → is_date
-  // cache to avoid redundant style lookups.
+  // Whether the cell's number format is a date/time format. Results are
+  // cached per cell-format index so each distinct format is inspected once.
+  bool isDateCell(XLCell &cell, const XLStyles &styles,
+                  std::unordered_map<XLStyleIndex, bool> &dateCache)
+  {
+    try
+    {
+      XLStyleIndex styleIdx = cell.cellFormat();
+      auto it = dateCache.find(styleIdx);
+      if (it != dateCache.end())
+        return it->second;
+
+      auto fmt = styles.cellFormats().cellFormatByIndex(styleIdx);
+      unsigned int fmtId = fmt.numberFormatId();
+      bool isDate = isBuiltinDateFormatId(fmtId);
+      if (!isDate && fmtId >= 164)
+      {
+        std::string code = styles.numberFormats()
+                                 .numberFormatById(fmtId)
+                                 .formatCode();
+        isDate = isDateFormatCode(code);
+      }
+      dateCache[styleIdx] = isDate;
+      return isDate;
+    }
+    catch (...)
+    {
+      return false;
+    }
+  }
+
+  // Convert an Excel date serial (local wall-clock time) to epoch seconds and
+  // milliseconds; tm receives the normalised calendar fields.
+  time_t serialToLocalTime(double serial, std::tm &tm, PVSSshort &milli)
+  {
+    // Round the whole serial to milliseconds once and derive both the time
+    // of day and the millisecond part from it. XLDateTime::tm() truncates, so
+    // taking seconds from it and milliseconds from a separately rounded
+    // fraction can be off by one second.
+    long long totalMillis = llround(serial * static_cast<double>(DAY_MILLIS));
+    long long roundedDay  = totalMillis / DAY_MILLIS;
+    long long msOfDay     = totalMillis % DAY_MILLIS;
+
+    // tm() yields the calendar date of floor(serial); carry into the next day
+    // when rounding crossed midnight (mktime normalises).
+    tm = XLDateTime(serial).tm();
+    tm.tm_mday += static_cast<int>(roundedDay - static_cast<long long>(floor(serial)));
+    tm.tm_hour  = static_cast<int>(msOfDay / 3600000LL);
+    tm.tm_min   = static_cast<int>(msOfDay / 60000LL % 60LL);
+    tm.tm_sec   = static_cast<int>(msOfDay / 1000LL % 60LL);
+    // Serials carry no UTC offset: in the repeated hour after the DST
+    // fall-back, mktime has to pick one of the two instants.
+    tm.tm_isdst = -1;
+
+    milli = static_cast<PVSSshort>(msOfDay % 1000LL);
+    return mktime(&tm);
+  }
+
+  // XLDateTime rejects serials below 1.0 (time-only values such as 08:00),
+  // so those are treated as plain numbers.
+  bool isDateValue(const XLCellValue &val, XLCell &cell, const XLStyles &styles,
+                   std::unordered_map<XLStyleIndex, bool> &dateCache)
+  {
+    return val.type() == XLValueType::Float
+        && val.get<double>() >= 1.0
+        && isDateCell(cell, styles, dateCache);
+  }
+
+  // Header cells may hold numbers, dates or booleans; get<std::string> throws
+  // for those, and getString() renders 2024 as "2024.000000".
+  std::string headerText(XLCell &cell, const XLStyles &styles,
+                         std::unordered_map<XLStyleIndex, bool> &dateCache)
+  {
+    XLCellValue val = cell.value();
+
+    if (isDateValue(val, cell, styles, dateCache))
+    {
+      std::tm tm{};
+      PVSSshort milli = 0;
+      serialToLocalTime(val.get<double>(), tm, milli);
+
+      bool hasTime = tm.tm_hour != 0 || tm.tm_min != 0 || tm.tm_sec != 0;
+      char buf[32];
+      strftime(buf, sizeof(buf), hasTime ? "%Y-%m-%d %H:%M:%S" : "%Y-%m-%d", &tm);
+      return buf;
+    }
+
+    switch (val.type())
+    {
+      case XLValueType::String:
+        return val.get<std::string>();
+      case XLValueType::Integer:
+        return std::to_string(val.get<int64_t>());
+      case XLValueType::Float:
+      {
+        double d = val.get<double>();
+        double intpart;
+        if (modf(d, &intpart) == 0.0 && fabs(intpart) < 1e15)
+          return std::to_string(static_cast<long long>(intpart));
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%.15g", d);
+        return buf;
+      }
+      case XLValueType::Boolean:
+        return val.get<bool>() ? "TRUE" : "FALSE";
+      default:
+        return std::string();
+    }
+  }
+
+  // Set a mapping value using the cell type reported by OpenXLSX.
   void setTypedCellCached(MappingVar &row, const Variable &key,
                           XLCell &cell,
                           const XLStyles &styles,
@@ -146,66 +258,27 @@ namespace
         return;
 
       case XLValueType::Integer:
-        row.setAt(key, IntegerVar(static_cast<int>(val.get<int64_t>())));
+      {
+        int64_t ival = val.get<int64_t>();
+        if (ival >= INT_MIN && ival <= INT_MAX)
+          row.setAt(key, IntegerVar(static_cast<int>(ival)));
+        else
+          row.setAt(key, LongVar(ival));
         return;
+      }
 
       case XLValueType::Float:
       {
-        bool isDate = false;
-        try
+        double dval = val.get<double>();
+        if (isDateValue(val, cell, styles, dateCache))
         {
-          XLStyleIndex styleIdx = cell.cellFormat();
-          auto it = dateCache.find(styleIdx);
-          if (it != dateCache.end())
-          {
-            isDate = it->second;
-          }
-          else
-          {
-            auto fmt = styles.cellFormats().cellFormatByIndex(styleIdx);
-            unsigned int fmtId = fmt.numberFormatId();
-            isDate = isBuiltinDateFormatId(fmtId);
-            if (!isDate && fmtId >= 164)
-            {
-              std::string code = styles.numberFormats()
-                                       .numberFormatById(fmtId)
-                                       .formatCode();
-              isDate = isDateFormatCode(code);
-            }
-            dateCache[styleIdx] = isDate;
-          }
-        }
-        catch (...) {}
-
-        if (isDate)
-        {
-          XLDateTime dt = val.get<XLDateTime>();
-          std::tm tm = dt.tm();
-          tm.tm_isdst = -1;
-          time_t sec = mktime(&tm);
-
-          double serial = dt.serial();
-          double frac = serial - floor(serial);
-
-          // Convert fraction-of-day to milliseconds with rounding so
-          // floating-point noise does not turn exact .000 into .999.
-          const long long dayMillis = 24LL * 60LL * 60LL * 1000LL;
-          long long totalMillis = static_cast<long long>(llround(frac * static_cast<double>(dayMillis)));
-
-          if (totalMillis < 0)
-            totalMillis = 0;
-          else if (totalMillis >= dayMillis)
-          {
-            totalMillis = 0;
-            sec += 1;
-          }
-
-          PVSSshort milli = static_cast<PVSSshort>(totalMillis % 1000LL);
+          std::tm tm{};
+          PVSSshort milli = 0;
+          time_t sec = serialToLocalTime(dval, tm, milli);
           row.setAt(key, TimeVar(sec, milli));
         }
         else
         {
-          double dval = val.get<double>();
           double intpart;
           if (modf(dval, &intpart) == 0.0
            && intpart >= INT_MIN && intpart <= INT_MAX)
@@ -233,6 +306,15 @@ namespace
   //----------------------------------------------------------------------------
   // Write helpers
   //----------------------------------------------------------------------------
+
+  // The row as a mapping (unwrapping anytype/mixed), or nullptr if it is not one.
+  const MappingVar *asMapping(const Variable *rowVar)
+  {
+    const Variable *inner = ExcelXlsxHelpers::unwrapAnyOrMixed(rowVar);
+    return (inner && inner->isA() == MAPPING_VAR)
+      ? static_cast<const MappingVar *>(inner)
+      : nullptr;
+  }
 
   // Write a single WinCC OA Variable to an OpenXLSX cell.
   void writeTypedCell(XLCell &cell, const Variable *val,
@@ -262,17 +344,21 @@ namespace
         return;
       case TIME_VAR:
       {
-        time_t sec = static_cast<time_t>(
-          static_cast<const TimeVar *>(val)->getSeconds());
+        const TimeVar *timeVal = static_cast<const TimeVar *>(val);
+        time_t sec = static_cast<time_t>(timeVal->getSeconds());
 
         // Excel date/time serials have no timezone. Convert epoch seconds to
         // local calendar fields first, then write those fields as XLDateTime
         // so displayed wall-clock time matches WinCC OA local time.
         std::tm localTm{};
-        if (toLocalCalendarTime(sec, localTm))
-          cell.value() = XLDateTime(localTm);
-        else
-          cell.value() = XLDateTime(sec);
+        XLDateTime dt = toLocalCalendarTime(sec, localTm)
+          ? XLDateTime(localTm)
+          : XLDateTime(sec);
+
+        // XLDateTime only carries whole seconds; add the milliseconds to the
+        // serial so they survive a round-trip.
+        cell.value() = XLDateTime(dt.serial()
+          + static_cast<double>(timeVal->getMilli()) / static_cast<double>(DAY_MILLIS));
 
         cell.setCellFormat(dateTimeFmtIdx);
         return;
@@ -316,71 +402,98 @@ namespace ExcelXlsxHelpers
     if (rowCount == 0 || colCount == 0)
       return;
 
-    std::vector<std::string> headers;
-    headers.reserve(colCount);
-    uint32_t dataStartRow = 1;
-  
-    if (useHeaders)
-    {
-      for (auto& cell : wks.row(1).cells(colCount))
-      {
-        XLCellValue val = cell.value();
-        if (val.type() == XLValueType::Empty)
-          headers.emplace_back("");
-        else
-          headers.emplace_back(val.get<std::string>());
-      }
-      dataStartRow = 2;
-    }
-
     // Pre-fetch styles once and cache format-index → is_date results so each
     // unique cell format is inspected only once across the entire sheet.
     XLStyles styles = doc.styles();
     std::unordered_map<XLStyleIndex, bool> dateCache;
+
+    // One mapping key per column: the header text, or the 1-based column
+    // number when headers are off or a header cell is empty. Repeated
+    // headers get a numeric suffix ("Value", "Value_2") so no two columns
+    // share a key and overwrite each other.
+    std::vector<std::unique_ptr<Variable>> keys;
+    keys.reserve(colCount);
+    uint32_t dataStartRow = 1;
+
+    if (useHeaders)
+    {
+      std::unordered_set<std::string> seen;
+      uint16_t c = 1;
+      for (auto& cell : wks.row(1).cells(colCount))
+      {
+        std::string name = headerText(cell, styles, dateCache);
+        if (name.empty())
+        {
+          keys.emplace_back(new IntegerVar(c));
+        }
+        else
+        {
+          std::string unique = name;
+          for (int n = 2; !seen.insert(unique).second; ++n)
+            unique = name + "_" + std::to_string(n);
+          keys.emplace_back(new TextVar(unique.c_str()));
+        }
+        ++c;
+      }
+      dataStartRow = 2;
+    }
+
+    for (uint16_t c = static_cast<uint16_t>(keys.size()) + 1; c <= colCount; ++c)
+      keys.emplace_back(new IntegerVar(c));
+
+    // Header-only sheet: rows(2, 1) would still yield one bogus row.
+    if (dataStartRow > rowCount)
+      return;
 
     for (auto& xlRow : wks.rows(dataStartRow, rowCount))
     {
       if (skipHidden && xlRow.isHidden())
         continue;
 
+      // cells(colCount) yields exactly colCount cells, one per key.
       MappingVar rowMap;
-      uint16_t c = 1;
+      size_t c = 0;
       for (auto& cell : xlRow.cells(colCount))
-      {
-        if (useHeaders && (c - 1) < static_cast<uint16_t>(headers.size()))
-          setTypedCellCached(rowMap, TextVar(headers[c - 1].c_str()), cell, styles, dateCache);
-        else
-          setTypedCellCached(rowMap, IntegerVar(c), cell, styles, dateCache);
-        ++c;
-      }
+        setTypedCellCached(rowMap, *keys[c++], cell, styles, dateCache);
       result.append(rowMap);
     }
   }
 
   // Write a DynVar of MappingVars to an OpenXLSX worksheet.
   // Column headers are taken from the keys of the first mapping row.
-  bool writeSheetData(XLWorksheet &wks, DynVar &data, XLDocument &doc)
+  bool writeSheetData(XLWorksheet &wks, const DynVar &data, XLDocument &doc)
   {
     unsigned int numRows = data.getNumberOfItems();
     if (numRows == 0)
       return true;
 
-    Variable *firstRowVar = data.getAt(0);
-    if (!firstRowVar)
-      return false;
+    // Validate every row before touching the sheet.
+    std::vector<const MappingVar *> rows;
+    rows.reserve(numRows);
+    for (unsigned int r = 0; r < numRows; r++)
+    {
+      const MappingVar *row = asMapping(data.getAt(r));
+      if (!row)
+        return false;
+      rows.push_back(row);
+    }
 
-    MappingVar firstRow;
-    firstRow = *firstRowVar;
+    const MappingVar &firstRow = *rows[0];
     unsigned int numCols = firstRow.getNumberOfItems();
     if (numCols == 0)
       return true;
 
-    // Collect column key names from the first row
+    // Keep the first row's keys for lookups: stringifying them and looking up
+    // by TextVar would miss non-text keys such as the integer column keys
+    // readSheetRows produces without headers.
+    std::vector<const Variable *> keys;
     std::vector<CharString> columnNames;
+    keys.reserve(numCols);
     columnNames.reserve(numCols);
     for (unsigned int c = 0; c < numCols; c++)
     {
-      Variable *key = firstRow.getKey(c);
+      const Variable *key = firstRow.getKey(c);
+      keys.push_back(key);
       columnNames.push_back(key->formatValue(CharString()));
     }
 
@@ -409,17 +522,9 @@ namespace ExcelXlsxHelpers
     // Write data rows starting from row 2
     for (unsigned int r = 0; r < numRows; r++)
     {
-      Variable *rowVar = data.getAt(r);
-      if (!rowVar)
-        continue;
-
-      MappingVar row;
-      row = *rowVar; // AnyTypeVar unwrapping via operator=
-
       for (unsigned int c = 0; c < numCols; c++)
       {
-        TextVar keyVar(columnNames[c].c_str());
-        Variable *cellVal = row.getAt(keyVar);
+        const Variable *cellVal = rows[r]->getAt(*keys[c]);
         auto cell = wks.cell(
           static_cast<uint32_t>(r + 2),
           static_cast<uint16_t>(c + 1)

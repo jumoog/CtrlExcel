@@ -3,11 +3,15 @@
 #include <ExcelXlsxHelpers.hxx>
 
 #include <DynVar.hxx>
+#include <ErrClass.hxx>
 #include <MappingVar.hxx>
 
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <utility>
+#include <vector>
 
 using namespace OpenXLSX;
 
@@ -21,6 +25,135 @@ static FunctionListRec fnList[] =
 };
 
 CTRL_EXTENSION(ExternHdl, fnList)
+
+//------------------------------------------------------------------------------
+
+namespace
+{
+  // Append an error the CTRL script can retrieve with getLastError().
+  void reportError(CtrlThread *thread, const char *funcName,
+                   const std::string &msg)
+  {
+    ErrClass err(ErrClass::PRIO_WARNING, ErrClass::ERR_CONTROL,
+                 ErrClass::UNEXPECTEDSTATE, "CtrlExcelReader", funcName,
+                 msg.c_str());
+    thread->appendLastError(&err);
+  }
+
+  // Report the exception currently being handled; call only from a catch block.
+  void reportCurrentException(CtrlThread *thread, const char *funcName,
+                              const std::string &context = std::string())
+  {
+    std::string prefix = context.empty() ? std::string() : context + ": ";
+    try
+    {
+      throw;
+    }
+    catch (const std::exception &e)
+    {
+      reportError(thread, funcName, prefix + e.what());
+    }
+    catch (...)
+    {
+      reportError(thread, funcName, prefix + "unknown error");
+    }
+  }
+
+  // Evaluate expr into out. False if the argument is missing or its
+  // evaluation failed (evaluate() then returns nullptr).
+  template <typename VarT>
+  bool evalArg(CtrlExpr *expr, CtrlThread *thread, VarT &out)
+  {
+    const Variable *value = expr ? expr->evaluate(thread) : nullptr;
+    if ( !value )
+      return false;
+
+    out = *value;
+    return true;
+  }
+
+  // Like evalArg, but an omitted argument keeps out's default value.
+  template <typename VarT>
+  bool evalOptionalArg(CtrlExpr *expr, CtrlThread *thread, VarT &out)
+  {
+    return !expr || evalArg(expr, thread, out);
+  }
+
+  // False if the file exists but cannot be opened for writing, e.g. because
+  // Excel holds it open. CTRL strings are UTF-8, hence u8path.
+  bool isWritableOrMissing(const std::string &filename)
+  {
+    std::filesystem::path filePath = std::filesystem::u8path(filename);
+    if ( !std::filesystem::exists(filePath) )
+      return true;
+
+    std::ofstream testWrite(filePath, std::ios::out | std::ios::app);
+    return testWrite.is_open();
+  }
+
+  // Sheet name and its rows (a dyn of mappings, possibly anytype-wrapped).
+  using SheetList = std::vector<std::pair<std::string, const Variable *>>;
+
+  // Write sheets to a new workbook at filename. The file is only saved when
+  // every sheet is valid, so a failed write leaves an existing file untouched.
+  bool writeWorkbook(CtrlThread *thread, const char *funcName,
+                     const std::string &filename, const SheetList &sheets)
+  {
+    std::vector<const DynVar *> sheetRows;
+    sheetRows.reserve(sheets.size());
+    for ( const auto &sheet : sheets )
+    {
+      const Variable *rows = ExcelXlsxHelpers::unwrapAnyOrMixed(sheet.second);
+      if ( !rows || !rows->isDynVar() )
+      {
+        reportError(thread, funcName, sheet.first + ": data must be a dyn_mapping");
+        return false;
+      }
+      sheetRows.push_back(static_cast<const DynVar *>(rows));
+    }
+
+    try
+    {
+      if ( !isWritableOrMissing(filename) )
+      {
+        reportError(thread, funcName, filename + ": file is locked or not writable");
+        return false;
+      }
+
+      // create() works on a temporary archive; filename is only written by save().
+      XLDocument doc;
+      doc.create(filename, XLForceOverwrite);
+      doc.setProperty(XLProperty::Creator, "WinCC OA");
+      doc.setProperty(XLProperty::LastModifiedBy, "WinCC OA");
+
+      auto wb = doc.workbook();
+      for ( size_t s = 0; s < sheets.size(); s++ )
+      {
+        const std::string &sheetName = sheets[s].first;
+        if ( s == 0 )
+          wb.worksheet(1).setName(sheetName);
+        else
+          wb.addWorksheet(sheetName);
+
+        auto wks = wb.worksheet(sheetName);
+        if ( !ExcelXlsxHelpers::writeSheetData(wks, *sheetRows[s], doc) )
+        {
+          reportError(thread, funcName, sheetName + ": every row must be a mapping");
+          return false;
+        }
+      }
+
+      doc.save();
+      doc.close();
+      return true;
+    }
+    catch (...)
+    {
+      reportCurrentException(thread, funcName, filename);
+      return false;
+    }
+  }
+}
 
 //------------------------------------------------------------------------------
 
@@ -49,11 +182,15 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       param.thread->clearLastError();
       dynTextResult.reset(TEXT_VAR);
 
-      if ( !hasNumArgs(1, param) )
+      if ( !hasNumArgs(1, 1, param) )
         return &dynTextResult;
 
       TextVar filenameVar;
-      filenameVar = *(param.args->getFirst()->evaluate(param.thread));
+      if ( !evalArg(param.args->getFirst(), param.thread, filenameVar) )
+      {
+        reportError(param.thread, "excelGetSheetNames", "argument could not be evaluated");
+        return &dynTextResult;
+      }
 
       try
       {
@@ -64,7 +201,10 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
           dynTextResult.append(TextVar(name.c_str()));
         doc.close();
       }
-      catch (...) {}
+      catch (...)
+      {
+        reportCurrentException(param.thread, "excelGetSheetNames", filenameVar.getValue());
+      }
 
       return &dynTextResult;
     }
@@ -78,26 +218,18 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       param.thread->clearLastError();
       dynMappingResult.reset(MAPPING_VAR);
 
+      if ( !hasNumArgs(2, 4, param) )
+        return &dynMappingResult;
+
       TextVar filenameVar, sheetnameVar;
-      filenameVar  = *(param.args->getFirst()->evaluate(param.thread));
-      sheetnameVar = *(param.args->getNext() ->evaluate(param.thread));
-
-      bool skipHidden = true;
-      CtrlExpr *skipArg = param.args->getNext();
-      if ( skipArg )
+      BitVar skipHiddenVar(true), headerVar(true);
+      if ( !evalArg(param.args->getFirst(), param.thread, filenameVar)
+        || !evalArg(param.args->getNext(), param.thread, sheetnameVar)
+        || !evalOptionalArg(param.args->getNext(), param.thread, skipHiddenVar)
+        || !evalOptionalArg(param.args->getNext(), param.thread, headerVar) )
       {
-        BitVar skipHiddenVar;
-        skipHiddenVar = *(skipArg->evaluate(param.thread));
-        skipHidden = skipHiddenVar.isTrue();
-      }
-
-      bool useHeaders = true;
-      CtrlExpr *headerArg = param.args->getNext();
-      if ( headerArg )
-      {
-        BitVar headerVar;
-        headerVar = *(headerArg->evaluate(param.thread));
-        useHeaders = headerVar.isTrue();
+        reportError(param.thread, "excelReadSheet", "argument could not be evaluated");
+        return &dynMappingResult;
       }
 
       try
@@ -110,10 +242,15 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
           ? doc.workbook().worksheet(std::string(sheetname))
           : doc.workbook().worksheet(1);
 
-        ExcelXlsxHelpers::readSheetRows(wks, doc, dynMappingResult, useHeaders, skipHidden);
+        ExcelXlsxHelpers::readSheetRows(wks, doc, dynMappingResult,
+                                        headerVar.isTrue(), skipHiddenVar.isTrue());
         doc.close();
       }
-      catch (...) {}
+      catch (...)
+      {
+        reportCurrentException(param.thread, "excelReadSheet",
+          std::string(filenameVar.getValue()) + " [" + sheetnameVar.getValue() + "]");
+      }
 
       return &dynMappingResult;
     }
@@ -126,25 +263,17 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       param.thread->clearLastError();
       mappingResult = MappingVar();
 
+      if ( !hasNumArgs(1, 3, param) )
+        return &mappingResult;
+
       TextVar filenameVar;
-      filenameVar = *(param.args->getFirst()->evaluate(param.thread));
-
-      bool skipHidden = true;
-      CtrlExpr *skipArg = param.args->getNext();
-      if ( skipArg )
+      BitVar skipHiddenVar(true), headerVar(true);
+      if ( !evalArg(param.args->getFirst(), param.thread, filenameVar)
+        || !evalOptionalArg(param.args->getNext(), param.thread, skipHiddenVar)
+        || !evalOptionalArg(param.args->getNext(), param.thread, headerVar) )
       {
-        BitVar skipHiddenVar;
-        skipHiddenVar = *(skipArg->evaluate(param.thread));
-        skipHidden = skipHiddenVar.isTrue();
-      }
-
-      bool useHeaders = true;
-      CtrlExpr *headerArg = param.args->getNext();
-      if ( headerArg )
-      {
-        BitVar headerVar;
-        headerVar = *(headerArg->evaluate(param.thread));
-        useHeaders = headerVar.isTrue();
+        reportError(param.thread, "excelReadFile", "argument could not be evaluated");
+        return &mappingResult;
       }
 
       try
@@ -155,18 +284,31 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
         auto sheetNames = doc.workbook().worksheetNames();
         for ( const auto &sn : sheetNames )
         {
-          auto wks = doc.workbook().worksheet(sn);
+          // A broken sheet must not discard the sheets read so far or after it.
+          try
+          {
+            auto wks = doc.workbook().worksheet(sn);
 
-          DynVar sheetDyn;
-          sheetDyn.reset(MAPPING_VAR);
-          ExcelXlsxHelpers::readSheetRows(wks, doc, sheetDyn, useHeaders, skipHidden);
+            DynVar sheetDyn;
+            sheetDyn.reset(MAPPING_VAR);
+            ExcelXlsxHelpers::readSheetRows(wks, doc, sheetDyn,
+                                            headerVar.isTrue(), skipHiddenVar.isTrue());
 
-          mappingResult.setAt(TextVar(sn.c_str()), sheetDyn);
+            mappingResult.setAt(TextVar(sn.c_str()), sheetDyn);
+          }
+          catch (...)
+          {
+            reportCurrentException(param.thread, "excelReadFile",
+              std::string(filenameVar.getValue()) + " [" + sn + "]");
+          }
         }
 
         doc.close();
       }
-      catch (...) {}
+      catch (...)
+      {
+        reportCurrentException(param.thread, "excelReadFile", filenameVar.getValue());
+      }
 
       return &mappingResult;
     }
@@ -179,56 +321,27 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       param.thread->clearLastError();
       writeResult = BitVar(false);
 
-      TextVar filenameVar, sheetnameVar;
-      filenameVar  = *(param.args->getFirst()->evaluate(param.thread));
-      sheetnameVar = *(param.args->getNext() ->evaluate(param.thread));
-
-      const Variable *dataPtr = param.args->getNext()->evaluate(param.thread);
-      dataPtr = ExcelXlsxHelpers::unwrapAnyOrMixed(dataPtr);
-      if ( !dataPtr || !dataPtr->isDynVar() )
+      if ( !hasNumArgs(3, 3, param) )
         return &writeResult;
 
-      DynVar *dataVar = const_cast<DynVar *>(static_cast<const DynVar *>(dataPtr));
-
-      try
+      TextVar filenameVar, sheetnameVar;
+      if ( !evalArg(param.args->getFirst(), param.thread, filenameVar)
+        || !evalArg(param.args->getNext(), param.thread, sheetnameVar) )
       {
-        // Check if file exists and is locked/opened by another process
-        std::filesystem::path filePath(filenameVar.getValue());
-        if ( std::filesystem::exists(filePath) )
-        {
-          // Try to open the file in write mode to check if it's accessible
-          std::ofstream testWrite(filePath, std::ios::out | std::ios::app);
-          if ( !testWrite.is_open() )
-          {
-            // File is likely opened by another process (e.g., Excel)
-            writeResult = BitVar(false);
-            return &writeResult;
-          }
-          testWrite.close();
-        }
-
-        XLDocument doc;
-        doc.create(filenameVar.getValue(), XLForceOverwrite);
-        doc.setProperty(XLProperty::Creator, "WinCC OA");
-        doc.setProperty(XLProperty::LastModifiedBy, "WinCC OA");
-
-        const char *sheetname = sheetnameVar.getValue();
-        std::string sheetName = (*sheetname) ? sheetname : "Sheet1";
-
-        auto wb = doc.workbook();
-        wb.worksheet(1).setName(sheetName);
-
-        auto wks = wb.worksheet(sheetName);
-        bool ok = ExcelXlsxHelpers::writeSheetData(wks, *dataVar, doc);
-
-        doc.save();
-        doc.close();
-
-        if ( ok )
-          writeResult = BitVar(true);
+        reportError(param.thread, "excelWriteSheet", "argument could not be evaluated");
+        return &writeResult;
       }
-      catch (...) {}
 
+      // Evaluated last and not copied; writeWorkbook reports nullptr or a
+      // non-dyn value as invalid data.
+      CtrlExpr *dataArg = param.args->getNext();
+      const Variable *dataPtr = dataArg ? dataArg->evaluate(param.thread) : nullptr;
+
+      const char *sheetname = sheetnameVar.getValue();
+      SheetList sheets{ { (*sheetname) ? sheetname : "Sheet1", dataPtr } };
+
+      writeResult = BitVar(writeWorkbook(param.thread, "excelWriteSheet",
+                                         filenameVar.getValue(), sheets));
       return &writeResult;
     }
 
@@ -239,11 +352,17 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       param.thread->clearLastError();
       writeResult = BitVar(false);
 
-      TextVar filenameVar;
-      filenameVar = *(param.args->getFirst()->evaluate(param.thread));
+      if ( !hasNumArgs(2, 2, param) )
+        return &writeResult;
 
+      TextVar filenameVar;
       MappingVar dataVar;
-      dataVar = *(param.args->getNext()->evaluate(param.thread));
+      if ( !evalArg(param.args->getFirst(), param.thread, filenameVar)
+        || !evalArg(param.args->getNext(), param.thread, dataVar) )
+      {
+        reportError(param.thread, "excelWriteFile", "argument could not be evaluated");
+        return &writeResult;
+      }
 
       unsigned int numSheets = dataVar.getNumberOfItems();
       if ( numSheets == 0 )
@@ -252,61 +371,16 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
         return &writeResult;
       }
 
-      try
+      SheetList sheets;
+      sheets.reserve(numSheets);
+      for ( unsigned int s = 0; s < numSheets; s++ )
       {
-        // Check if file exists and is locked/opened by another process
-        std::filesystem::path filePath(filenameVar.getValue());
-        if ( std::filesystem::exists(filePath) )
-        {
-          // Try to open the file in write mode to check if it's accessible
-          std::ofstream testWrite(filePath, std::ios::out | std::ios::app);
-          if ( !testWrite.is_open() )
-          {
-            // File is likely opened by another process (e.g., Excel)
-            writeResult = BitVar(false);
-            return &writeResult;
-          }
-          testWrite.close();
-        }
-
-        XLDocument doc;
-        doc.create(filenameVar.getValue(), XLForceOverwrite);
-        doc.setProperty(XLProperty::Creator, "WinCC OA");
-        doc.setProperty(XLProperty::LastModifiedBy, "WinCC OA");
-
-        auto wb = doc.workbook();
-        bool ok = true;
-
-        for ( unsigned int s = 0; s < numSheets; s++ )
-        {
-          CharString sheetName = dataVar.getKey(s)->formatValue(CharString());
-          std::string sheetNameStr(sheetName.c_str());
-
-          if ( s == 0 )
-            wb.worksheet(1).setName(sheetNameStr);
-          else
-            wb.addWorksheet(sheetNameStr);
-
-          auto wks = wb.worksheet(sheetNameStr);
-
-          const Variable *sheetDataVar = dataVar.getValue(s);
-          sheetDataVar = ExcelXlsxHelpers::unwrapAnyOrMixed(sheetDataVar);
-          if ( !sheetDataVar || !sheetDataVar->isDynVar() )
-            continue;
-
-          DynVar *sheetData = const_cast<DynVar *>(
-            static_cast<const DynVar *>(sheetDataVar));
-          ok = ExcelXlsxHelpers::writeSheetData(wks, *sheetData, doc) && ok;
-        }
-
-        doc.save();
-        doc.close();
-
-        if ( ok )
-          writeResult = BitVar(true);
+        CharString sheetName = dataVar.getKey(s)->formatValue(CharString());
+        sheets.emplace_back(sheetName.c_str(), dataVar.getValue(s));
       }
-      catch (...) {}
 
+      writeResult = BitVar(writeWorkbook(param.thread, "excelWriteFile",
+                                         filenameVar.getValue(), sheets));
       return &writeResult;
     }
 

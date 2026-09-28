@@ -20,7 +20,8 @@ namespace ExcelXlsxHelpers
   void readSheetRows(OpenXLSX::XLWorksheet &wks, OpenXLSX::XLDocument &doc,
                      DynVar &result, bool useHeaders, bool skipHidden);
 
-  bool writeSheetData(OpenXLSX::XLWorksheet &wks, DynVar &data,
+  // Returns false, leaving the sheet untouched, if any row is not a mapping.
+  bool writeSheetData(OpenXLSX::XLWorksheet &wks, const DynVar &data,
                       OpenXLSX::XLDocument &doc);
 }
 
