@@ -10,15 +10,24 @@
 #include <TimeVar.hxx>
 #include <WaitCond.hxx>
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <shared_mutex>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -137,6 +146,82 @@ namespace
     return testWrite.is_open();
   }
 
+  // Serialises operations on the same file: writes exclusive, reads shared.
+  // The *Async variants run on worker threads, so two scripts writing (or
+  // one writing, one reading) the same path would otherwise race on save();
+  // the single-threaded CTRL engine used to serialise them implicitly.
+  class PathLock
+  {
+    public:
+      PathLock(const std::string &utf8Path, bool exclusive)
+        : mutex_(mutexFor(utf8Path)), exclusive_(exclusive)
+      {
+        if ( exclusive_ )
+          mutex_->lock();
+        else
+          mutex_->lock_shared();
+      }
+
+      ~PathLock()
+      {
+        if ( exclusive_ )
+          mutex_->unlock();
+        else
+          mutex_->unlock_shared();
+      }
+
+      PathLock(const PathLock &) = delete;
+      PathLock &operator=(const PathLock &) = delete;
+
+    private:
+      static std::string normalisedPath(const std::string &utf8Path)
+      {
+        std::string key;
+        try
+        {
+          std::error_code ec;
+          std::filesystem::path path = std::filesystem::u8path(utf8Path);
+          std::filesystem::path full = std::filesystem::weakly_canonical(path, ec);
+          key = (ec ? path : full).lexically_normal().u8string();
+        }
+        catch (const std::exception &)
+        {
+          key = utf8Path; // e.g. invalid UTF-8: lock on the literal name
+        }
+#ifdef _WIN32
+        // Windows paths are case-insensitive.
+        for ( char &c : key )
+          c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+#endif
+        return key;
+      }
+
+      static std::shared_ptr<std::shared_mutex> mutexFor(const std::string &utf8Path)
+      {
+        // Never destroyed: worker threads may still take locks while static
+        // objects are torn down at manager exit.
+        static std::mutex *registryMutex = new std::mutex;
+        static auto *registry = new std::unordered_map<std::string, std::weak_ptr<std::shared_mutex>>;
+
+        std::string key = normalisedPath(utf8Path);
+        std::lock_guard<std::mutex> guard(*registryMutex);
+
+        for ( auto it = registry->begin(); it != registry->end(); )
+          it = it->second.expired() ? registry->erase(it) : std::next(it);
+
+        std::shared_ptr<std::shared_mutex> mutex = (*registry)[key].lock();
+        if ( !mutex )
+        {
+          mutex = std::make_shared<std::shared_mutex>();
+          (*registry)[key] = mutex;
+        }
+        return mutex;
+      }
+
+      std::shared_ptr<std::shared_mutex> mutex_;
+      bool exclusive_;
+  };
+
   //----------------------------------------------------------------------------
   // Operations. They take plain inputs (UTF-8 names), write their result into
   // Variables they are given and collect messages, without touching the
@@ -172,6 +257,7 @@ namespace
     names.reset(TEXT_VAR);
     try
     {
+      PathLock lock(filename, false);
       XLDocument doc;
       doc.open(filename);
       // Worksheets only: chartsheets cannot be read by excelReadSheet.
@@ -195,6 +281,7 @@ namespace
     const std::string requestedName = sheetName;
     try
     {
+      PathLock lock(filename, false);
       XLDocument doc;
       doc.open(filename);
 
@@ -230,6 +317,7 @@ namespace
     sheets.clear();
     try
     {
+      PathLock lock(filename, false);
       XLDocument doc;
       doc.open(filename);
 
@@ -317,6 +405,7 @@ namespace
 
     try
     {
+      PathLock lock(filename, true);
       if ( !isWritableOrMissing(filename) )
       {
         msgs.add(filename + ": file is locked or not writable");
@@ -424,22 +513,124 @@ namespace
   {
     std::atomic<bool> done{false};
     Messages msgs;
-    std::function<void(Job &)> work;          // runs on the worker thread
+    std::function<void(Job &)> work;          // runs on a worker thread
     std::function<void(Variable &)> deliver;  // runs on the CTRL thread
+  };
+
+  // A few worker threads shared by all *Async calls, started on demand.
+  // Bounds concurrency (each running job holds a whole workbook in memory)
+  // and thread creation (a failure is reported instead of leaving a script
+  // waiting). At manager exit queued jobs are dropped and the workers are
+  // joined, so none runs while the extension is torn down.
+  class WorkerPool
+  {
+    public:
+      static WorkerPool &instance()
+      {
+        static WorkerPool pool;
+        return pool;
+      }
+
+      // Queue a job; false if no worker thread exists or could be started.
+      bool submit(std::shared_ptr<Job> job)
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if ( stopping_ )
+          return false;
+
+        if ( idle_ == 0 && threads_.size() < maxThreads() )
+        {
+          try
+          {
+            threads_.emplace_back([this] { run(); });
+          }
+          catch (const std::system_error &)
+          {
+            if ( threads_.empty() )
+              return false; // no thread at all; busy workers would pick it up otherwise
+          }
+        }
+
+        queue_.push_back(std::move(job));
+        lock.unlock();
+        wakeup_.notify_one();
+        return true;
+      }
+
+      ~WorkerPool()
+      {
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          stopping_ = true;
+          queue_.clear();
+        }
+        wakeup_.notify_all();
+        for ( auto &thread : threads_ )
+          if ( thread.joinable() )
+            thread.join();
+      }
+
+    private:
+      WorkerPool() = default;
+
+      static size_t maxThreads()
+      {
+        unsigned cores = std::thread::hardware_concurrency();
+        return std::clamp<size_t>(cores ? cores / 2 : 2, 2, 4);
+      }
+
+      void run()
+      {
+        for (;;)
+        {
+          std::shared_ptr<Job> job;
+          {
+            std::unique_lock<std::mutex> lock(mutex_);
+            ++idle_;
+            wakeup_.wait(lock, [this] { return stopping_ || !queue_.empty(); });
+            --idle_;
+            if ( stopping_ )
+              return;
+            job = std::move(queue_.front());
+            queue_.pop_front();
+          }
+
+          try
+          {
+            job->work(*job);
+          }
+          catch (...)
+          {
+            job->msgs.addCurrentException(std::string());
+          }
+          job->done.store(true, std::memory_order_release);
+        }
+      }
+
+      std::mutex mutex_;
+      std::condition_variable wakeup_;
+      std::deque<std::shared_ptr<Job>> queue_;
+      std::vector<std::thread> threads_;
+      size_t idle_ = 0;
+      bool stopping_ = false;
   };
 
   class JobWait : public WaitCond
   {
     public:
-      JobWait(std::shared_ptr<Job> job, CtrlThread *thread, Variable *target, std::string funcName)
-        : job_(std::move(job)), thread_(thread), target_(target), funcName_(std::move(funcName)) { }
+      JobWait(std::shared_ptr<Job> job, const ExternHdl &hdl,
+              const BaseExternHdl::ExecuteParamRec &param, CtrlExpr *targetExpr)
+        : job_(std::move(job)), hdl_(hdl), param_(param), targetExpr_(targetExpr),
+          funcName_(param.funcName.c_str()), started_(std::chrono::steady_clock::now()) { }
 
-      // Poll interval: checkDone() is cheap, but the engine need not call it
-      // more often than this.
+      // Poll interval: short at first so small files return quickly, then
+      // relaxed for long jobs. The worker cannot wake the engine.
       const TimeVar &nextCheck() const override
       {
+        auto elapsed = std::chrono::steady_clock::now() - started_;
+        PVSSshort interval = elapsed < std::chrono::milliseconds(100) ? 5 : 50;
         next_ = TimeVar();
-        next_ += TimeVar(0, static_cast<PVSSshort>(POLL_MILLIS));
+        next_ += TimeVar(0, interval);
         return next_;
       }
 
@@ -451,21 +642,44 @@ namespace
         if ( !delivered_ )
         {
           delivered_ = true;
-          job_->deliver(*target_);
-          job_->msgs.report(thread_, funcName_.c_str());
+
+          // Nothing may escape into the engine's scheduler.
+          try
+          {
+            // Resolved again instead of keeping the pointer from the call:
+            // the variable (e.g. an element of a shared dyn) may have been
+            // removed by another script while this one waited.
+            Variable *target = hdl_.resolveTarget(targetExpr_, param_);
+            if ( target )
+              job_->deliver(*target);
+            else
+              job_->msgs.add("the result variable no longer exists; result discarded");
+          }
+          catch (...)
+          {
+            job_->msgs.addCurrentException("delivering the result");
+          }
+
+          try
+          {
+            job_->msgs.report(param_.thread, funcName_.c_str());
+          }
+          catch (...)
+          {
+          }
         }
         return 1;
       }
 
     private:
-      static constexpr int POLL_MILLIS = 50;
-
-      // Shared with the worker thread, which may outlive this wait condition
-      // (e.g. when the script is stopped while waiting).
+      // Shared with the worker thread, which may still hold it if the script
+      // (and this wait condition) goes away first.
       std::shared_ptr<Job> job_;
-      CtrlThread *thread_;
-      Variable *target_;
+      const ExternHdl &hdl_;
+      BaseExternHdl::ExecuteParamRec param_;
+      CtrlExpr *targetExpr_;
       std::string funcName_; // copied: param.funcName does not outlive execute()
+      std::chrono::steady_clock::time_point started_;
       bool delivered_ = false;
       mutable TimeVar next_{0, static_cast<PVSSshort>(0)};
   };
@@ -481,25 +695,43 @@ namespace
       target = rows;
   }
 
-  void startJob(CtrlThread *thread, Variable *target, const char *funcName,
-                std::shared_ptr<Job> job)
+  // Hand the sheets of readFile() to a mapping variable, moving the rows.
+  void deliverSheets(SheetResults &sheets, Variable &target)
   {
-    thread->setWaitCond(new JobWait(job, thread, target, funcName));
-
-    // Detached: the job state is shared, so it stays valid if the script
-    // (and its JobWait) goes away first.
-    std::thread([job]
+    if ( target.isA() != MAPPING_VAR )
     {
-      try
-      {
-        job->work(*job);
-      }
-      catch (...)
-      {
-        job->msgs.addCurrentException(std::string());
-      }
-      job->done.store(true, std::memory_order_release);
-    }).detach();
+      // Unusual target type: let CTRL's assignment convert a copy.
+      MappingVar result;
+      for ( auto &sheet : sheets )
+        result.setAt(TextVar(sheet.first.c_str()), *sheet.second);
+      target = result;
+      return;
+    }
+
+    MappingVar &result = static_cast<MappingVar &>(target);
+    result = MappingVar();
+    for ( auto &sheet : sheets )
+    {
+      // Insert an empty dyn_mapping, then move the rows into it.
+      TextVar key(sheet.first.c_str());
+      DynVar empty;
+      empty.reset(MAPPING_VAR);
+      result.setAt(key, empty);
+      Variable *slot = result.getAt(key);
+      deliverRows(*sheet.second, slot ? *slot : static_cast<Variable &>(empty));
+    }
+  }
+
+  // Queue the job and suspend the calling script until it is done. False
+  // (nothing queued, script not suspended) if no worker thread can run it.
+  bool startJob(const ExternHdl &hdl, const BaseExternHdl::ExecuteParamRec &param,
+                CtrlExpr *targetExpr, std::shared_ptr<Job> job)
+  {
+    if ( !WorkerPool::instance().submit(job) )
+      return false;
+
+    param.thread->setWaitCond(new JobWait(job, hdl, param, targetExpr));
+    return true;
   }
 }
 
@@ -604,8 +836,7 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       Messages msgs;
       SheetResults sheets;
       readFile(utf8Arg(filenameVar), opts, sheets, msgs);
-      for ( auto &sheet : sheets )
-        mappingResult.setAt(TextVar(sheet.first.c_str()), *sheet.second);
+      deliverSheets(sheets, mappingResult);
       msgs.report(param.thread, funcName);
       return &mappingResult;
     }
@@ -677,9 +908,9 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       TextVar filenameVar;
       if ( !hasNumArgs(2, 2, param) )
         return &asyncRejected;
-      Variable *target = nullptr;
+      CtrlExpr *targetExpr = nullptr;
       if ( !evalArg(param.args->getFirst(), param.thread, filenameVar)
-        || !(target = getTarget(param.args->getNext(), param, NO_VAR)) )
+        || !resolveTarget(targetExpr = param.args->getNext(), param) )
       {
         reportError(param.thread, funcName, "argument could not be evaluated or is not a variable");
         return &asyncRejected;
@@ -690,7 +921,11 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       std::string filename = utf8Arg(filenameVar);
       job->work = [filename, names](Job &j) { getSheetNames(filename, *names, j.msgs); };
       job->deliver = [names](Variable &out) { out = *names; };
-      startJob(param.thread, target, funcName, job);
+      if ( !startJob(*this, param, targetExpr, job) )
+      {
+        reportError(param.thread, funcName, "no worker thread available");
+        return &asyncRejected;
+      }
       return &asyncStarted;
     }
 
@@ -704,10 +939,10 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       ReadOptions opts;
       if ( !hasNumArgs(3, 6, param) )
         return &asyncRejected;
-      Variable *target = nullptr;
+      CtrlExpr *targetExpr = nullptr;
       if ( !evalArg(param.args->getFirst(), param.thread, filenameVar)
         || !evalArg(param.args->getNext(), param.thread, sheetnameVar)
-        || !(target = getTarget(param.args->getNext(), param, NO_VAR))
+        || !resolveTarget(targetExpr = param.args->getNext(), param)
         || !parseReadOptions(param.args, param.thread, opts) )
       {
         reportError(param.thread, funcName, "argument could not be evaluated or is not a variable");
@@ -723,7 +958,11 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
         readSheet(filename, sheetname, opts, *rows, j.msgs);
       };
       job->deliver = [rows](Variable &out) { deliverRows(*rows, out); };
-      startJob(param.thread, target, funcName, job);
+      if ( !startJob(*this, param, targetExpr, job) )
+      {
+        reportError(param.thread, funcName, "no worker thread available");
+        return &asyncRejected;
+      }
       return &asyncStarted;
     }
 
@@ -736,9 +975,9 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       ReadOptions opts;
       if ( !hasNumArgs(2, 5, param) )
         return &asyncRejected;
-      Variable *target = nullptr;
+      CtrlExpr *targetExpr = nullptr;
       if ( !evalArg(param.args->getFirst(), param.thread, filenameVar)
-        || !(target = getTarget(param.args->getNext(), param, NO_VAR))
+        || !resolveTarget(targetExpr = param.args->getNext(), param)
         || !parseReadOptions(param.args, param.thread, opts) )
       {
         reportError(param.thread, funcName, "argument could not be evaluated or is not a variable");
@@ -749,32 +988,12 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       auto sheets = std::make_shared<SheetResults>();
       std::string filename = utf8Arg(filenameVar);
       job->work = [filename, opts, sheets](Job &j) { readFile(filename, opts, *sheets, j.msgs); };
-      job->deliver = [sheets](Variable &out)
+      job->deliver = [sheets](Variable &out) { deliverSheets(*sheets, out); };
+      if ( !startJob(*this, param, targetExpr, job) )
       {
-        if ( out.isA() != MAPPING_VAR )
-        {
-          // Unusual target type: let CTRL's assignment convert a copy.
-          MappingVar result;
-          for ( auto &sheet : *sheets )
-            result.setAt(TextVar(sheet.first.c_str()), *sheet.second);
-          out = result;
-          return;
-        }
-
-        MappingVar &result = static_cast<MappingVar &>(out);
-        result = MappingVar();
-        for ( auto &sheet : *sheets )
-        {
-          // Insert an empty dyn_mapping, then move the rows into it.
-          TextVar key(sheet.first.c_str());
-          DynVar empty;
-          empty.reset(MAPPING_VAR);
-          result.setAt(key, empty);
-          Variable *slot = result.getAt(key);
-          deliverRows(*sheet.second, slot ? *slot : static_cast<Variable &>(empty));
-        }
-      };
-      startJob(param.thread, target, funcName, job);
+        reportError(param.thread, funcName, "no worker thread available");
+        return &asyncRejected;
+      }
       return &asyncStarted;
     }
 
@@ -797,8 +1016,8 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       const Variable *data = evalWriteSheetData(param.args->getNext(), param.thread);
       std::shared_ptr<Variable> dataCopy(data ? data->clone() : nullptr);
 
-      Variable *target = getTarget(param.args->getNext(), param, NO_VAR);
-      if ( !target )
+      CtrlExpr *targetExpr = param.args->getNext();
+      if ( !resolveTarget(targetExpr, param) )
       {
         reportError(param.thread, funcName, "ok must be a variable");
         return &asyncRejected;
@@ -815,7 +1034,11 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
         *ok = writeWorkbook(filename, SheetList{ { sheetname, dataCopy.get() } }, j.msgs);
       };
       job->deliver = [ok](Variable &out) { out = BitVar(*ok); };
-      startJob(param.thread, target, funcName, job);
+      if ( !startJob(*this, param, targetExpr, job) )
+      {
+        reportError(param.thread, funcName, "no worker thread available");
+        return &asyncRejected;
+      }
       return &asyncStarted;
     }
 
@@ -841,8 +1064,8 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       // Copied: the script's variable may change while the worker runs.
       std::shared_ptr<Variable> dataCopy(data->clone());
 
-      Variable *target = getTarget(param.args->getNext(), param, NO_VAR);
-      if ( !target )
+      CtrlExpr *targetExpr = param.args->getNext();
+      if ( !resolveTarget(targetExpr, param) )
       {
         reportError(param.thread, funcName, "ok must be a variable");
         return &asyncRejected;
@@ -859,7 +1082,11 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
           sheetsOf(*static_cast<const MappingVar *>(dataCopy.get()), noRows), j.msgs);
       };
       job->deliver = [ok](Variable &out) { out = BitVar(*ok); };
-      startJob(param.thread, target, funcName, job);
+      if ( !startJob(*this, param, targetExpr, job) )
+      {
+        reportError(param.thread, funcName, "no worker thread available");
+        return &asyncRejected;
+      }
       return &asyncStarted;
     }
 

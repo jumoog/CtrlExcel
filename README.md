@@ -166,6 +166,8 @@ excelWriteSheetAsync("C:/data/out.xlsx", "Data", rows, ok);
 
 The data passed to the write variants is copied when the call starts, so the script may change its variables while the write runs.
 
+Async operations run on a small pool of background threads (up to 4 at a time; further calls queue). Operations on the same file are serialised (reads may run together, writes run alone), for the blocking functions as well, so parallel scripts never see or produce a half-written file. The reference argument is looked up again when the result arrives, so it may be an element of a shared `dyn` or `mapping`; if that element was removed meanwhile, the result is discarded with an error. A call takes at least a few milliseconds more than the blocking variant, since the waiting script is only checked periodically.
+
 ## Error handling
 
 Every function clears and then fills the CTRL error list, so failures can be inspected with `getLastError()`. As for every CTRL function, read it immediately after the call: any other function call in between (even `dynlen`) replaces the list.

@@ -23,6 +23,10 @@ dyn_string g_skippedTests;
 int g_ticks;
 bool g_ticking;
 
+// excelAsyncConcurrencyTest: parallel CTRL threads report here.
+int g_concurrentDone;
+dyn_string g_concurrentFailures;
+
 //--------------------------------------------------------------------------------
 /**
 */
@@ -48,6 +52,7 @@ void main()
   recordTest("excelFixtureTest", excelFixtureTest());
   recordTest("excelAsyncRoundTripTest", excelAsyncRoundTripTest());
   recordTest("excelAsyncDoesNotBlockTest", excelAsyncDoesNotBlockTest());
+  recordTest("excelAsyncConcurrencyTest", excelAsyncConcurrencyTest());
   // Last: passes a dyn where the signature declares a mapping.
   recordTest("excelWriteFileWrongTypeTest", excelWriteFileWrongTypeTest());
 
@@ -844,6 +849,74 @@ bool excelAsyncDoesNotBlockTest()
               && ticksDuring >= expected / 2 && ticksDuring >= 2;
   DebugTN("excelAsyncDoesNotBlockTest", "read seconds", seconds, "ticks during read", ticksDuring,
           "rows", dynlen(back), "pass", pass);
+  remove(filename);
+  return pass;
+}
+
+void concurrentWriter(string filename, int writer)
+{
+  dyn_anytype rows;
+
+  for (int i = 1; i <= 2000; i++)
+  {
+    dynAppend(rows, makeMapping("Writer", writer, "I", i));
+  }
+
+  bool ok;
+  excelWriteSheetAsync(filename, "Data", rows, ok);
+
+  if (!ok)
+    dynAppend(g_concurrentFailures, "writer " + writer);
+
+  g_concurrentDone++;
+}
+
+void concurrentReader(string filename, int reader)
+{
+  dyn_mapping rows;
+  excelReadSheetAsync(filename, "Data", rows);
+
+  // Each read must see one complete write, never a mix or a partial file.
+  if (dynlen(rows) != 2000 || rows[1]["Writer"] != rows[2000]["Writer"])
+    dynAppend(g_concurrentFailures, "reader " + reader + " saw " + dynlen(rows) + " rows");
+
+  g_concurrentDone++;
+}
+
+// Several scripts writing and reading the same file through the *Async
+// variants at once: operations on one path are serialised, so the file is
+// never corrupted and every read sees a complete workbook.
+bool excelAsyncConcurrencyTest()
+{
+  string filename = getTempFile("excelAsyncConcurrencyTest");
+
+  if (filename == "") return FALSE;
+
+  g_concurrentDone = 0;
+  g_concurrentFailures = makeDynString();
+
+  // Seed the file so early readers find a complete workbook.
+  concurrentWriter(filename, 0);
+
+  for (int i = 1; i <= 3; i++)
+  {
+    startThread("concurrentWriter", filename, i);
+    startThread("concurrentReader", filename, i);
+  }
+
+  time deadline = getCurrentTime() + 60;
+
+  while (g_concurrentDone < 7 && getCurrentTime() < deadline)
+  {
+    delay(0, 20);
+  }
+
+  dyn_mapping back = excelReadSheet(filename, "Data");
+  bool finalOk = dynlen(back) == 2000 && back[1]["Writer"] == back[2000]["Writer"];
+
+  bool pass = g_concurrentDone == 7 && dynlen(g_concurrentFailures) == 0 && finalOk;
+  DebugTN("excelAsyncConcurrencyTest", "finished", g_concurrentDone, "failures", g_concurrentFailures,
+          "final rows", dynlen(back), "pass", pass);
   remove(filename);
   return pass;
 }

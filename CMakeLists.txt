@@ -24,4 +24,8 @@ find_package(pugixml CONFIG REQUIRED)
 find_package(miniz CONFIG REQUIRED)
 find_package(Boost CONFIG REQUIRED COMPONENTS nowide)
 find_package(OpenXLSX CONFIG REQUIRED)
-target_link_libraries(${TARGET} OpenXLSX::OpenXLSX)
+
+# Worker threads of the *Async functions (std::thread needs -pthread on Linux)
+find_package(Threads REQUIRED)
+
+target_link_libraries(${TARGET} OpenXLSX::OpenXLSX Threads::Threads)
