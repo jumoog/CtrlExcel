@@ -28,7 +28,7 @@ Always build after changing C++ code and keep it warning-free.
 
 ## Testing
 
-There is no C++ test harness. `ExcelRoundTripTest.ctl` runs inside a WinCC OA project with the built DLL loaded (`LoadCtrlLibs = "CtrlExcelReader"`); each test logs `pass` via `DebugTN`. An agent cannot run it: say so and ask the user to run it after behaviour changes. Add a test function there (and call it from `main()`) for new behaviour that the write API can produce.
+There is no C++ test harness. `ExcelRoundTripTest.ctl` runs inside a WinCC OA project with the built DLL loaded (`LoadCtrlLibs = "CtrlExcelReader"`); each test logs `pass` via `DebugTN`. An agent cannot run it: say so and ask the user to run it after behaviour changes. After every rebuild, the new DLL must be copied into the project's `bin/` and the CTRL manager restarted (a running manager keeps the old DLL loaded). A test failure that contradicts the current code is most likely a stale DLL: ask for the DLL's timestamp before debugging. Add a test function there (and call it from `main()`) for new behaviour that the write API can produce.
 
 ## Known pitfalls
 

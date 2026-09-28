@@ -74,7 +74,8 @@ bool checkRows(dyn_mapping rows, time t1, time t2, string context = "checkRows")
 {
   if (dynlen(rows) != 2)
   {
-    DebugTN(context + ": unexpected row count", dynlen(rows));
+    // getLastError() still holds the errors of the read that produced rows.
+    DebugTN(context + ": unexpected row count", dynlen(rows), getLastError());
     return false;
   }
 
