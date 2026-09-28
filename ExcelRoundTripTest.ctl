@@ -14,30 +14,61 @@
 //--------------------------------------------------------------------------------
 // Variables and Constants
 
+// Results collected by recordTest() / skipTest() for the summary in main().
+int g_passedTests;
+dyn_string g_failedTests;
+dyn_string g_skippedTests;
+
 //--------------------------------------------------------------------------------
 /**
 */
 void main()
 {
-  excelRoundTripTestSingle();
-  excelRoundTripTestFile();
-  excelRoundTripTestIntKeys();
-  excelFailedWriteKeepsFileTest();
-  excelReadErrorReportedTest();
-  excelLongValueTest();
-  excelEmptyHeaderTest();
-  excelSheetNameValidationTest();
-  excelControlCharsTest();
-  excelTextTooLongTest();
-  excelUnionKeysTest();
-  excelMidnightDateTest();
-  excelLargeFloatTest();
-  excelWideTextTest();
-  excelTooManyColumnsTest();
-  excelEmptySheetNameTest();
-  excelFixtureTest();
+  recordTest("excelRoundTripTestSingle", excelRoundTripTestSingle());
+  recordTest("excelRoundTripTestFile", excelRoundTripTestFile());
+  recordTest("excelRoundTripTestIntKeys", excelRoundTripTestIntKeys());
+  recordTest("excelFailedWriteKeepsFileTest", excelFailedWriteKeepsFileTest());
+  recordTest("excelReadErrorReportedTest", excelReadErrorReportedTest());
+  recordTest("excelLongValueTest", excelLongValueTest());
+  recordTest("excelEmptyHeaderTest", excelEmptyHeaderTest());
+  recordTest("excelSheetNameValidationTest", excelSheetNameValidationTest());
+  recordTest("excelControlCharsTest", excelControlCharsTest());
+  recordTest("excelTextTooLongTest", excelTextTooLongTest());
+  recordTest("excelUnionKeysTest", excelUnionKeysTest());
+  recordTest("excelMidnightDateTest", excelMidnightDateTest());
+  recordTest("excelLargeFloatTest", excelLargeFloatTest());
+  recordTest("excelWideTextTest", excelWideTextTest());
+  recordTest("excelTooManyColumnsTest", excelTooManyColumnsTest());
+  recordTest("excelEmptySheetNameTest", excelEmptySheetNameTest());
+  recordTest("excelEmptyWriteFileTest", excelEmptyWriteFileTest());
+  recordTest("excelFixtureTest", excelFixtureTest());
   // Last: passes a dyn where the signature declares a mapping.
-  excelWriteFileWrongTypeTest();
+  recordTest("excelWriteFileWrongTypeTest", excelWriteFileWrongTypeTest());
+
+  DebugTN("ExcelRoundTripTest summary",
+          dynlen(g_failedTests) == 0 ? "ALL PASSED" : "FAILURES",
+          "passed", g_passedTests,
+          "failed", g_failedTests,
+          "skipped", g_skippedTests);
+}
+
+// Counts a test result; tests that called skipTest() count as skipped.
+void recordTest(string name, bool pass)
+{
+  if (dynContains(g_skippedTests, name) > 0)
+    return;
+
+  if (pass)
+    g_passedTests++;
+  else
+    dynAppend(g_failedTests, name);
+}
+
+// Marks a test as skipped (it then returns TRUE, which recordTest ignores).
+void skipTest(string name, string reason)
+{
+  dynAppend(g_skippedTests, name);
+  DebugTN(name, "skipped: " + reason);
 }
 
 // Returns a temporary filename, or "" on failure.
@@ -629,7 +660,7 @@ bool excelFixtureTest()
 
   if (filename == "")
   {
-    DebugTN("excelFixtureTest", "skipped: copy testdata/CtrlExcelReaderFixture.xlsx into the project's data directory");
+    skipTest("excelFixtureTest", "copy testdata/CtrlExcelReaderFixture.xlsx into the project's data directory");
     return TRUE;
   }
 
@@ -673,5 +704,28 @@ bool excelFixtureTest()
   }
 
   DebugTN("excelFixtureTest", "pass", pass);
+  return pass;
+}
+
+// excelWriteFile with an empty mapping writes a workbook with one empty sheet
+// (like excelWriteSheet with empty data) instead of returning TRUE without a
+// file.
+bool excelEmptyWriteFileTest()
+{
+  string filename = getTempFile("excelEmptyWriteFileTest");
+
+  if (filename == "") return FALSE;
+
+  remove(filename);
+
+  mapping noSheets;
+  bool writeOk = excelWriteFile(filename, noSheets);
+  bool exists = isfile(filename);
+  dyn_string sheets = excelGetSheetNames(filename);
+
+  bool pass = writeOk && exists && dynlen(sheets) == 1 && sheets[1] == "Sheet1"
+              && dynlen(excelReadSheet(filename, "Sheet1")) == 0;
+  DebugTN("excelEmptyWriteFileTest", "writeOk", writeOk, "exists", exists, "sheets", sheets, "pass", pass);
+  remove(filename);
   return pass;
 }

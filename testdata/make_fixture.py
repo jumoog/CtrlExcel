@@ -161,11 +161,12 @@ def main():
         'xl/sharedStrings.xml': shared_strings_xml(),
         'xl/worksheets/sheet1.xml': sheet,
     }
-    with zipfile.ZipFile(OUTPUT, 'w', zipfile.ZIP_DEFLATED) as z:
+    with zipfile.ZipFile(OUTPUT, 'w', zipfile.ZIP_STORED) as z:
         for name, data in parts.items():
-            # Fixed timestamp keeps the output byte-identical across runs.
+            # Fixed timestamp and no compression (deflate output depends on the
+            # zlib build) keep the output byte-identical on every machine.
             info = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
-            info.compress_type = zipfile.ZIP_DEFLATED
+            info.compress_type = zipfile.ZIP_STORED
             z.writestr(info, data.encode('utf-8'))
     print(f'wrote {OUTPUT}')
 

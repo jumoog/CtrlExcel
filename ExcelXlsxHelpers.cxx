@@ -69,6 +69,7 @@ namespace
 {
   constexpr uint32_t EXCEL_FMT_DATE_TIME = 22;
   constexpr long long DAY_MILLIS = 24LL * 60LL * 60LL * 1000LL;
+  constexpr long long DAY_SECONDS = 24LL * 60LL * 60LL;
   constexpr size_t EXCEL_MAX_CELL_CHARS = 32767;
   constexpr size_t EXCEL_MAX_SHEET_NAME_CHARS = 31;
   constexpr size_t EXCEL_MAX_ROWS = 1048576;
@@ -435,12 +436,49 @@ namespace
     }
   }
 
+  // State of one sheet read: counters for cells read with a fallback
+  // (reported as warnings afterwards) and a cache of each calendar day's UTC
+  // offset. mktime is slow on MSVC (it re-evaluates the time-zone rules on
+  // every call), so it runs about twice per distinct day instead of once per
+  // date cell; only days on which the offset changes (DST transitions) are
+  // converted per cell.
+  struct ReadState
+  {
+    static constexpr long long OFFSET_VARIES = LLONG_MIN;
+
+    size_t uncachedFormulas = 0;     // read as ""
+    size_t unrepresentableDates = 0; // read as the Excel serial (float)
+    size_t shiftedTimes = 0;         // nonexistent local times, moved by mktime
+    std::unordered_map<long long, long long> dayOffset; // unixDay -> seconds east of UTC
+  };
+
+  enum class LocalTime
+  {
+    Ok,
+    Shifted,    // did not exist (hour skipped at the DST spring-forward)
+    OutOfRange  // outside CTRL time: before 1970-01-01 UTC or after MaxTimeVarSec
+  };
+
+  // Seconds east of UTC at the given local calendar time, or OFFSET_VARIES if
+  // mktime cannot convert it.
+  long long utcOffsetAt(std::tm tm, long long unixDay, long long secOfDay)
+  {
+    tm.tm_hour  = static_cast<int>(secOfDay / 3600);
+    tm.tm_min   = static_cast<int>(secOfDay / 60 % 60);
+    tm.tm_sec   = static_cast<int>(secOfDay % 60);
+    tm.tm_isdst = -1;
+    time_t t = mktime(&tm);
+    if (t == static_cast<time_t>(-1))
+      return ReadState::OFFSET_VARIES;
+    return unixDay * DAY_SECONDS + secOfDay - static_cast<long long>(t);
+  }
+
   // Convert an Excel date serial (local wall-clock time) to epoch seconds and
-  // milliseconds; tm receives the calendar fields. False if the time is
-  // outside what a CTRL time can hold (from 1970-01-01 UTC up to
-  // TimeVar::MaxTimeVarSec, 2262 on 64-bit), e.g. a 1960 birth date or the
-  // 1900-01-01 placeholder Excel users often type.
-  bool serialToLocalTime(double serial, std::tm &tm, PVSSshort &milli, time_t &sec)
+  // milliseconds; tm receives the calendar fields. CTRL time holds only
+  // 1970-01-01 UTC up to TimeVar::MaxTimeVarSec (2262 on 64-bit), so e.g. a
+  // 1960 birth date or the 1900-01-01 placeholder is OutOfRange.
+  LocalTime serialToLocalTime(double serial, std::tm &tm, PVSSshort &milli, time_t &sec,
+                              ReadState &state)
   {
     // Round the whole serial to milliseconds once and derive date, time of
     // day and milliseconds from it, so they cannot disagree by a second.
@@ -448,6 +486,7 @@ namespace
     long long excelDay    = totalMillis / DAY_MILLIS; // serial >= 1, never negative
     long long msOfDay     = totalMillis % DAY_MILLIS;
     long long unixDay     = excelDayToUnixDay(excelDay);
+    long long secOfDay    = msOfDay / 1000LL;
 
     long long year;
     unsigned month, day;
@@ -457,27 +496,52 @@ namespace
     tm.tm_year  = static_cast<int>(year - 1900);
     tm.tm_mon   = static_cast<int>(month) - 1;
     tm.tm_mday  = static_cast<int>(day);
-    tm.tm_hour  = static_cast<int>(msOfDay / 3600000LL);
-    tm.tm_min   = static_cast<int>(msOfDay / 60000LL % 60LL);
-    tm.tm_sec   = static_cast<int>(msOfDay / 1000LL % 60LL);
-    // Serials carry no UTC offset: in the repeated hour after the DST
-    // fall-back, mktime has to pick one of the two instants.
+    tm.tm_hour  = static_cast<int>(secOfDay / 3600);
+    tm.tm_min   = static_cast<int>(secOfDay / 60 % 60);
+    tm.tm_sec   = static_cast<int>(secOfDay % 60);
     tm.tm_isdst = -1;
 
     milli = static_cast<PVSSshort>(msOfDay % 1000LL);
 
     sec = 0;
     if (unixDay < 0)
-      return false; // before 1970 even in local time
+      return LocalTime::OutOfRange; // before 1970 even in local time
 
-    // mktime returns -1 for times before the epoch (and MSVC's after 3000).
-    std::tm probe = tm;
-    time_t t = mktime(&probe);
-    if (t == static_cast<time_t>(-1) || t < 0 || t > TimeVar::MaxTimeVarSec)
-      return false;
+    auto cached = state.dayOffset.find(unixDay);
+    if (cached == state.dayOffset.end())
+    {
+      long long atStart = utcOffsetAt(tm, unixDay, 0);
+      long long atEnd   = utcOffsetAt(tm, unixDay, DAY_SECONDS - 1);
+      cached = state.dayOffset.emplace(
+        unixDay, atStart == atEnd ? atStart : ReadState::OFFSET_VARIES).first;
+    }
 
-    sec = t;
-    return true;
+    LocalTime result = LocalTime::Ok;
+    long long t;
+    if (cached->second != ReadState::OFFSET_VARIES)
+    {
+      t = unixDay * DAY_SECONDS + secOfDay - cached->second;
+    }
+    else
+    {
+      // DST transition day (or a day mktime cannot convert). Serials carry no
+      // UTC offset: in the repeated hour after the fall-back mktime has to
+      // pick one of the two instants, and a time in the hour skipped at the
+      // spring-forward does not exist and is moved by mktime.
+      std::tm probe = tm;
+      time_t converted = mktime(&probe);
+      if (converted == static_cast<time_t>(-1))
+        return LocalTime::OutOfRange; // mktime fails before the epoch (and on MSVC after 3000)
+      if (probe.tm_hour != tm.tm_hour || probe.tm_min != tm.tm_min)
+        result = LocalTime::Shifted;
+      t = static_cast<long long>(converted);
+    }
+
+    if (t < 0 || t > static_cast<long long>(TimeVar::MaxTimeVarSec))
+      return LocalTime::OutOfRange;
+
+    sec = static_cast<time_t>(t);
+    return result;
   }
 
   // Numeric value of a cell. OpenXLSX types numeric text without '.' as
@@ -567,7 +631,8 @@ namespace
   // Header cells may hold numbers, dates or booleans; get<std::string> throws
   // for those, and getString() renders 2024 as "2024.000000".
   std::string headerText(XLCell &cell, const XLStyles &styles,
-                         std::unordered_map<XLStyleIndex, bool> &dateCache)
+                         std::unordered_map<XLStyleIndex, bool> &dateCache,
+                         ReadState &state)
   {
     XLCellValue val = cell.value();
 
@@ -583,7 +648,7 @@ namespace
         std::tm tm{};
         PVSSshort milli = 0;
         time_t sec = 0;
-        serialToLocalTime(num.value, tm, milli, sec);
+        serialToLocalTime(num.value, tm, milli, sec, state);
 
         bool hasTime = tm.tm_hour != 0 || tm.tm_min != 0 || tm.tm_sec != 0;
         char buf[32];
@@ -613,13 +678,6 @@ namespace
     }
   }
 
-  // Cells read with a fallback, reported as warnings after the sheet.
-  struct ReadStats
-  {
-    size_t uncachedFormulas = 0;    // read as ""
-    size_t unrepresentableDates = 0; // read as the Excel serial (float)
-  };
-
   // Set a mapping value using the cell type reported by OpenXLSX. Returns
   // false for an empty cell. A formula without a cached result (files
   // generated by tools and never recalculated by Excel) reads as "" but
@@ -628,14 +686,14 @@ namespace
                           XLCell &cell,
                           const XLStyles &styles,
                           std::unordered_map<XLStyleIndex, bool> &dateCache,
-                          ReadStats &stats)
+                          ReadState &state)
   {
     XLCellValue val = cell.value();
 
     if (isUncachedFormula(cell, val))
     {
       row.setAt(key, TextVar(""));
-      ++stats.uncachedFormulas;
+      ++state.uncachedFormulas;
       return true;
     }
 
@@ -647,14 +705,17 @@ namespace
         std::tm tm{};
         PVSSshort milli = 0;
         time_t sec = 0;
-        if (serialToLocalTime(num.value, tm, milli, sec))
+        LocalTime converted = serialToLocalTime(num.value, tm, milli, sec, state);
+        if (converted == LocalTime::OutOfRange)
         {
-          row.setAt(key, TimeVar(sec, milli));
+          row.setAt(key, FloatVar(num.value));
+          ++state.unrepresentableDates;
         }
         else
         {
-          row.setAt(key, FloatVar(num.value));
-          ++stats.unrepresentableDates;
+          row.setAt(key, TimeVar(sec, milli));
+          if (converted == LocalTime::Shifted)
+            ++state.shiftedTimes;
         }
       }
       else if (num.isInteger)
@@ -825,6 +886,23 @@ namespace
   }
 } // namespace
 
+namespace
+{
+  // Call fn(columnIndex, cell) for columns 1..colCount of an existing row,
+  // with cell == nullptr where the row has no cell. Dereferencing OpenXLSX
+  // cell iterators creates missing cells in the XML (and rows().cells()
+  // visits every position), which for a sheet with a stray cell far out
+  // (row 1048576, column XFD) would materialise millions of nodes.
+  template <typename Fn>
+  void forEachCell(XLWorksheet &wks, uint32_t row, uint16_t colCount, Fn &&fn)
+  {
+    XLCellRange range = wks.range(XLCellReference(row, 1), XLCellReference(row, colCount));
+    uint16_t c = 0;
+    for (auto it = range.begin(); it != range.end(); ++it, ++c)
+      fn(c, it.cellExists() ? &*it : nullptr);
+  }
+}
+
 namespace ExcelXlsxHelpers
 {
   // Read an open worksheet into a DynVar of MappingVar rows.
@@ -853,31 +931,31 @@ namespace ExcelXlsxHelpers
     keys.reserve(colCount);
     uint32_t dataStartRow = 1;
 
+    ReadState state;
+
     if (useHeaders)
     {
       std::unordered_set<std::string> seen;
-      uint16_t c = 1;
-      for (auto& cell : wks.row(1).cells(colCount))
+      forEachCell(wks, 1, colCount, [&](uint16_t index, XLCell *cell)
       {
-        std::string name = headerText(cell, styles, dateCache);
+        const uint16_t c = static_cast<uint16_t>(index + 1);
+        std::string name = cell ? headerText(*cell, styles, dateCache, state) : std::string();
         if (name.empty())
         {
           keys.emplace_back(new IntegerVar(c));
+          return;
         }
-        else
-        {
-          if (!isRepresentable(name))
-            warnings.push_back("header '" + name + "' in column " + std::to_string(c)
-                               + " cannot be represented in the project encoding");
 
-          std::string projectName = fromUtf8(name).c_str();
-          std::string unique = projectName;
-          for (int n = 2; !seen.insert(unique).second; ++n)
-            unique = projectName + "_" + std::to_string(n);
-          keys.emplace_back(new TextVar(unique.c_str()));
-        }
-        ++c;
-      }
+        if (!isRepresentable(name))
+          warnings.push_back("header '" + name + "' in column " + std::to_string(c)
+                             + " cannot be represented in the project encoding");
+
+        std::string projectName = fromUtf8(name).c_str();
+        std::string unique = projectName;
+        for (int n = 2; !seen.insert(unique).second; ++n)
+          unique = projectName + "_" + std::to_string(n);
+        keys.emplace_back(new TextVar(unique.c_str()));
+      });
       dataStartRow = 2;
     }
 
@@ -888,20 +966,37 @@ namespace ExcelXlsxHelpers
     if (dataStartRow > rowCount)
       return;
 
-    ReadStats stats;
+    // A row without any cells, appended for rows that do not exist when
+    // empty rows are kept (so result index still maps to the Excel row).
+    MappingVar emptyRow;
+    if (!skipEmpty)
+      for (const auto &key : keys)
+        emptyRow.setAt(*key, TextVar(""));
 
-    for (auto& xlRow : wks.rows(dataStartRow, rowCount))
+    // Only rows that exist in the XML are visited cell by cell (see
+    // forEachCell); rowExists() does not create missing rows.
+    XLRowRange rows = wks.rows(dataStartRow, rowCount);
+    for (auto it = rows.begin(); it != rows.end(); ++it)
     {
-      if (skipHidden && xlRow.isHidden())
+      if (!it.rowExists())
+      {
+        if (!skipEmpty)
+          result.append(emptyRow);
+        continue;
+      }
+
+      if (skipHidden && it->isHidden())
         continue;
 
-      // cells(colCount) yields exactly colCount cells, one per key.
       MappingVar rowMap;
-      size_t c = 0;
       bool hasValue = false;
-      for (auto& cell : xlRow.cells(colCount))
-        hasValue = setTypedCellCached(rowMap, *keys[c++], cell, styles, dateCache,
-                                      stats) || hasValue;
+      forEachCell(wks, it.rowNumber(), colCount, [&](uint16_t c, XLCell *cell)
+      {
+        if (cell)
+          hasValue = setTypedCellCached(rowMap, *keys[c], *cell, styles, dateCache, state) || hasValue;
+        else
+          rowMap.setAt(*keys[c], TextVar(""));
+      });
 
       // rowCount() includes rows that only carry formatting (fill, height);
       // by default rows without any value are not records.
@@ -909,12 +1004,16 @@ namespace ExcelXlsxHelpers
         result.append(rowMap);
     }
 
-    if (stats.unrepresentableDates > 0)
-      warnings.push_back(std::to_string(stats.unrepresentableDates)
+    if (state.unrepresentableDates > 0)
+      warnings.push_back(std::to_string(state.unrepresentableDates)
                          + " date cell(s) lie outside the range of CTRL time (1970 to 2262) and "
                            "read as their Excel serial number (float)");
-    if (stats.uncachedFormulas > 0)
-      warnings.push_back(std::to_string(stats.uncachedFormulas)
+    if (state.shiftedTimes > 0)
+      warnings.push_back(std::to_string(state.shiftedTimes)
+                         + " time(s) fall into the hour skipped when daylight saving time starts "
+                           "and were moved to the next valid time");
+    if (state.uncachedFormulas > 0)
+      warnings.push_back(std::to_string(state.uncachedFormulas)
                          + " formula cell(s) have no calculated value and read as \"\"; "
                            "open and save the file in Excel to calculate them");
   }

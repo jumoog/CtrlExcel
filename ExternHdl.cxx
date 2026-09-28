@@ -466,13 +466,15 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
 
       const MappingVar &dataVar = *static_cast<const MappingVar *>(dataPtr);
       unsigned int numSheets = dataVar.getNumberOfItems();
-      if ( numSheets == 0 )
-      {
-        writeResult = BitVar(true);
-        return &writeResult;
-      }
+
+      // An empty mapping writes a workbook with one empty sheet, as
+      // excelWriteSheet does for empty data, instead of no file at all.
+      DynVar noRows;
+      noRows.reset(MAPPING_VAR);
 
       SheetList sheets;
+      if ( numSheets == 0 )
+        sheets.emplace_back("Sheet1", &noRows);
       sheets.reserve(numSheets);
       for ( unsigned int s = 0; s < numSheets; s++ )
       {
