@@ -150,16 +150,20 @@ namespace
   // The *Async variants run on worker threads, so two scripts writing (or
   // one writing, one reading) the same path would otherwise race on save();
   // the single-threaded CTRL engine used to serialise them implicitly.
+  // Only try-locks: the worker pool skips jobs whose file is busy, and the
+  // blocking functions fail with "file is busy" instead of freezing the
+  // CTRL manager until an async job on that file finishes.
   class PathLock
   {
     public:
-      PathLock(const std::string &utf8Path, bool exclusive)
-        : mutex_(mutexFor(utf8Path)), exclusive_(exclusive)
+      // nullptr if another operation holds a conflicting lock right now.
+      static std::unique_ptr<PathLock> tryAcquire(const std::string &utf8Path, bool exclusive)
       {
-        if ( exclusive_ )
-          mutex_->lock();
-        else
-          mutex_->lock_shared();
+        std::shared_ptr<std::shared_mutex> mutex = mutexFor(utf8Path);
+        bool locked = exclusive ? mutex->try_lock() : mutex->try_lock_shared();
+        if ( !locked )
+          return nullptr;
+        return std::unique_ptr<PathLock>(new PathLock(std::move(mutex), exclusive));
       }
 
       ~PathLock()
@@ -174,6 +178,11 @@ namespace
       PathLock &operator=(const PathLock &) = delete;
 
     private:
+      PathLock(std::shared_ptr<std::shared_mutex> mutex, bool exclusive)
+        : mutex_(std::move(mutex)), exclusive_(exclusive) { }
+
+      // Lexical only: canonicalising (resolving symlinks) touches the file
+      // system and can stall for seconds on an unreachable network share.
       static std::string normalisedPath(const std::string &utf8Path)
       {
         std::string key;
@@ -181,7 +190,7 @@ namespace
         {
           std::error_code ec;
           std::filesystem::path path = std::filesystem::u8path(utf8Path);
-          std::filesystem::path full = std::filesystem::weakly_canonical(path, ec);
+          std::filesystem::path full = std::filesystem::absolute(path, ec);
           key = (ec ? path : full).lexically_normal().u8string();
         }
         catch (const std::exception &)
@@ -222,11 +231,19 @@ namespace
       bool exclusive_;
   };
 
+  std::string busyMessage(const std::string &filename)
+  {
+    return filename + ": file is busy (an ...Async call of another script is reading or writing it); "
+                      "retry later, or use the ...Async variant, which waits without blocking";
+  }
+
   //----------------------------------------------------------------------------
-  // Operations. They take plain inputs (UTF-8 names), write their result into
+  // Operations. They take plain inputs (UTF-8 names), write UTF-8 results into
   // Variables they are given and collect messages, without touching the
-  // CtrlThread, so both the blocking functions and the *Async variants (on a
-  // worker thread) use them.
+  // CtrlThread or WinCC OA's encoding converter, so both the blocking
+  // functions and the *Async variants (on a worker thread) use them. The
+  // caller holds the file's PathLock; the finish* steps below convert the
+  // results on the CTRL thread.
   //----------------------------------------------------------------------------
 
   struct ReadOptions
@@ -257,15 +274,11 @@ namespace
     names.reset(TEXT_VAR);
     try
     {
-      PathLock lock(filename, false);
       XLDocument doc;
       doc.open(filename);
       // Worksheets only: chartsheets cannot be read by excelReadSheet.
       for ( const auto &name : doc.workbook().worksheetNames() )
-      {
-        checkRepresentableSheetName(msgs, name);
-        names.append(projectText(name));
-      }
+        names.append(TextVar(name.c_str()));
       doc.close();
     }
     catch (...)
@@ -274,14 +287,15 @@ namespace
     }
   }
 
-  void readSheet(const std::string &filename, std::string sheetName,
+  // sheetName is updated to the sheet actually read (the first worksheet
+  // for an empty name).
+  void readSheet(const std::string &filename, std::string &sheetName,
                  const ReadOptions &opts, DynVar &rows, Messages &msgs)
   {
     rows.reset(MAPPING_VAR);
     const std::string requestedName = sheetName;
     try
     {
-      PathLock lock(filename, false);
       XLDocument doc;
       doc.open(filename);
 
@@ -308,7 +322,7 @@ namespace
     }
   }
 
-  // Sheets of a file read: key (project encoding) and rows.
+  // Sheets of a file read: name (UTF-8) and rows.
   using SheetResults = std::vector<std::pair<std::string, std::unique_ptr<DynVar>>>;
 
   void readFile(const std::string &filename, const ReadOptions &opts,
@@ -317,14 +331,8 @@ namespace
     sheets.clear();
     try
     {
-      PathLock lock(filename, false);
       XLDocument doc;
       doc.open(filename);
-
-      // Keys in the project encoding; names that collapse to the same text
-      // (characters the codepage lacks) get a suffix instead of overwriting
-      // each other, as header keys do.
-      std::unordered_set<std::string> usedKeys;
 
       for ( const auto &sn : doc.workbook().worksheetNames() )
       {
@@ -339,18 +347,7 @@ namespace
           ExcelXlsxHelpers::readSheetRows(wks, doc, *rows, opts.useHeaders, opts.skipHidden,
                                           opts.skipEmpty, warnings);
           addWarnings(msgs, filename + " [" + sn + "]", warnings);
-
-          checkRepresentableSheetName(msgs, sn);
-
-          std::string baseKey = ExcelXlsxHelpers::fromUtf8(sn).c_str();
-          std::string key = baseKey;
-          for ( int n = 2; !usedKeys.insert(key).second; ++n )
-            key = baseKey + "_" + std::to_string(n);
-          if ( key != baseKey )
-            msgs.add("sheet '" + sn + "' is returned under key '"
-              + ExcelXlsxHelpers::toUtf8(key.c_str()) + "' because its name collides after encoding conversion");
-
-          sheets.emplace_back(key, std::move(rows));
+          sheets.emplace_back(sn, std::move(rows));
         }
         catch (...)
         {
@@ -405,7 +402,6 @@ namespace
 
     try
     {
-      PathLock lock(filename, true);
       if ( !isWritableOrMissing(filename) )
       {
         msgs.add(filename + ": file is locked or not writable");
@@ -511,10 +507,12 @@ namespace
 
   struct Job
   {
+    std::string path;        // file the job reads or writes (UTF-8), for PathLock
+    bool exclusive = false;  // true for writes
     std::atomic<bool> done{false};
     Messages msgs;
-    std::function<void(Job &)> work;          // runs on a worker thread
-    std::function<void(Variable &)> deliver;  // runs on the CTRL thread
+    std::function<void(Job &)> work;                    // runs on a worker thread
+    std::function<void(Variable &, Messages &)> deliver; // runs on the CTRL thread
   };
 
   // A few worker threads shared by all *Async calls, started on demand.
@@ -553,7 +551,7 @@ namespace
 
         queue_.push_back(std::move(job));
         lock.unlock();
-        wakeup_.notify_one();
+        wakeup_.notify_all();
         return true;
       }
 
@@ -581,20 +579,39 @@ namespace
 
       void run()
       {
+        std::unique_lock<std::mutex> lock(mutex_);
         for (;;)
         {
           std::shared_ptr<Job> job;
+          std::unique_ptr<PathLock> fileLock;
+          for (;;)
           {
-            std::unique_lock<std::mutex> lock(mutex_);
-            ++idle_;
-            wakeup_.wait(lock, [this] { return stopping_ || !queue_.empty(); });
-            --idle_;
             if ( stopping_ )
               return;
-            job = std::move(queue_.front());
-            queue_.pop_front();
+
+            // The first queued job whose file is free. Jobs for a busy file
+            // stay queued instead of occupying a worker while they wait.
+            for ( auto it = queue_.begin(); it != queue_.end(); ++it )
+            {
+              fileLock = PathLock::tryAcquire((*it)->path, (*it)->exclusive);
+              if ( fileLock )
+              {
+                job = std::move(*it);
+                queue_.erase(it);
+                break;
+              }
+            }
+            if ( job )
+              break;
+
+            // Woken by submit and by finished jobs; the timeout covers locks
+            // released by blocking calls on the CTRL thread.
+            ++idle_;
+            wakeup_.wait_for(lock, std::chrono::milliseconds(50));
+            --idle_;
           }
 
+          lock.unlock();
           try
           {
             job->work(*job);
@@ -603,7 +620,12 @@ namespace
           {
             job->msgs.addCurrentException(std::string());
           }
+          // Release the file before signalling completion, so the resumed
+          // script can use the file right away.
+          fileLock.reset();
           job->done.store(true, std::memory_order_release);
+          lock.lock();
+          wakeup_.notify_all(); // queued jobs for this file may run now
         }
       }
 
@@ -648,10 +670,11 @@ namespace
           {
             // Resolved again instead of keeping the pointer from the call:
             // the variable (e.g. an element of a shared dyn) may have been
-            // removed by another script while this one waited.
+            // removed by another script while this one waited. The argument
+            // expression is therefore evaluated a second time (README).
             Variable *target = hdl_.resolveTarget(targetExpr_, param_);
             if ( target )
-              job_->deliver(*target);
+              job_->deliver(*target, job_->msgs);
             else
               job_->msgs.add("the result variable no longer exists; result discarded");
           }
@@ -684,6 +707,33 @@ namespace
       mutable TimeVar next_{0, static_cast<PVSSshort>(0)};
   };
 
+  //----------------------------------------------------------------------------
+  // Finishing steps, on the CTRL thread: the operations produce UTF-8 (they
+  // may run on a worker thread); these convert to the project encoding with
+  // WinCC OA's converter, which is only used from the CTRL thread, and hand
+  // the result to the script.
+  //----------------------------------------------------------------------------
+
+  void finishNames(DynVar &names, Messages &msgs)
+  {
+    for ( unsigned int i = 0; i < names.getNumberOfItems(); i++ )
+    {
+      Variable *name = names.getAt(i);
+      if ( !name || name->isA() != TEXT_VAR )
+        continue;
+      std::string utf8 = static_cast<TextVar *>(name)->getValue();
+      checkRepresentableSheetName(msgs, utf8);
+      *name = projectText(utf8);
+    }
+  }
+
+  void finishRows(DynVar &rows, const std::string &context, Messages &msgs)
+  {
+    std::vector<std::string> warnings;
+    ExcelXlsxHelpers::convertRowsToProjectEncoding(rows, warnings);
+    addWarnings(msgs, context, warnings);
+  }
+
   // Hand rows (a dyn of mappings) to the script's variable. Moved when the
   // target is a dyn_mapping, so a huge result is not deep-copied on the CTRL
   // thread; any other type gets CTRL's converting assignment.
@@ -695,30 +745,51 @@ namespace
       target = rows;
   }
 
-  // Hand the sheets of readFile() to a mapping variable, moving the rows.
-  void deliverSheets(SheetResults &sheets, Variable &target)
+  // Convert the sheets of readFile() and hand them to a mapping variable.
+  // Sheet names that collapse to the same text in the project encoding
+  // (characters the codepage lacks) get a suffix instead of overwriting
+  // each other, as header keys do.
+  void deliverSheets(SheetResults &sheets, Variable &target,
+                     const std::string &filename, Messages &msgs)
   {
+    std::unordered_set<std::string> usedKeys;
+    std::vector<std::string> keys;
+    for ( auto &sheet : sheets )
+    {
+      finishRows(*sheet.second, filename + " [" + sheet.first + "]", msgs);
+      checkRepresentableSheetName(msgs, sheet.first);
+
+      std::string baseKey = ExcelXlsxHelpers::fromUtf8(sheet.first).c_str();
+      std::string key = baseKey;
+      for ( int n = 2; !usedKeys.insert(key).second; ++n )
+        key = baseKey + "_" + std::to_string(n);
+      if ( key != baseKey )
+        msgs.add("sheet '" + sheet.first + "' is returned under key '"
+          + ExcelXlsxHelpers::toUtf8(key.c_str()) + "' because its name collides after encoding conversion");
+      keys.push_back(key);
+    }
+
     if ( target.isA() != MAPPING_VAR )
     {
       // Unusual target type: let CTRL's assignment convert a copy.
       MappingVar result;
-      for ( auto &sheet : sheets )
-        result.setAt(TextVar(sheet.first.c_str()), *sheet.second);
+      for ( size_t i = 0; i < sheets.size(); i++ )
+        result.setAt(TextVar(keys[i].c_str()), *sheets[i].second);
       target = result;
       return;
     }
 
     MappingVar &result = static_cast<MappingVar &>(target);
     result = MappingVar();
-    for ( auto &sheet : sheets )
+    for ( size_t i = 0; i < sheets.size(); i++ )
     {
       // Insert an empty dyn_mapping, then move the rows into it.
-      TextVar key(sheet.first.c_str());
+      TextVar key(keys[i].c_str());
       DynVar empty;
       empty.reset(MAPPING_VAR);
       result.setAt(key, empty);
       Variable *slot = result.getAt(key);
-      deliverRows(*sheet.second, slot ? *slot : static_cast<Variable &>(empty));
+      deliverRows(*sheets[i].second, slot ? *slot : static_cast<Variable &>(empty));
     }
   }
 
@@ -783,8 +854,17 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
         return &dynTextResult;
       }
 
+      std::string filename = utf8Arg(filenameVar);
+      auto fileLock = PathLock::tryAcquire(filename, false);
+      if ( !fileLock )
+      {
+        reportError(param.thread, funcName, busyMessage(filename));
+        return &dynTextResult;
+      }
+
       Messages msgs;
-      getSheetNames(utf8Arg(filenameVar), dynTextResult, msgs);
+      getSheetNames(filename, dynTextResult, msgs);
+      finishNames(dynTextResult, msgs);
       msgs.report(param.thread, funcName);
       return &dynTextResult;
     }
@@ -809,8 +889,18 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
         return &dynMappingResult;
       }
 
+      std::string filename = utf8Arg(filenameVar);
+      auto fileLock = PathLock::tryAcquire(filename, false);
+      if ( !fileLock )
+      {
+        reportError(param.thread, funcName, busyMessage(filename));
+        return &dynMappingResult;
+      }
+
       Messages msgs;
-      readSheet(utf8Arg(filenameVar), utf8Arg(sheetnameVar), opts, dynMappingResult, msgs);
+      std::string sheetname = utf8Arg(sheetnameVar);
+      readSheet(filename, sheetname, opts, dynMappingResult, msgs);
+      finishRows(dynMappingResult, filename + " [" + sheetname + "]", msgs);
       msgs.report(param.thread, funcName);
       return &dynMappingResult;
     }
@@ -833,10 +923,18 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
         return &mappingResult;
       }
 
+      std::string filename = utf8Arg(filenameVar);
+      auto fileLock = PathLock::tryAcquire(filename, false);
+      if ( !fileLock )
+      {
+        reportError(param.thread, funcName, busyMessage(filename));
+        return &mappingResult;
+      }
+
       Messages msgs;
       SheetResults sheets;
-      readFile(utf8Arg(filenameVar), opts, sheets, msgs);
-      deliverSheets(sheets, mappingResult);
+      readFile(filename, opts, sheets, msgs);
+      deliverSheets(sheets, mappingResult, filename, msgs);
       msgs.report(param.thread, funcName);
       return &mappingResult;
     }
@@ -863,8 +961,16 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       const Variable *data = evalWriteSheetData(param.args->getNext(), param.thread);
       std::string sheetname = utf8Arg(sheetnameVar);
 
+      std::string filename = utf8Arg(filenameVar);
+      auto fileLock = PathLock::tryAcquire(filename, true);
+      if ( !fileLock )
+      {
+        reportError(param.thread, funcName, busyMessage(filename));
+        return &writeResult;
+      }
+
       Messages msgs;
-      writeResult = BitVar(writeWorkbook(utf8Arg(filenameVar),
+      writeResult = BitVar(writeWorkbook(filename,
         SheetList{ { sheetname.empty() ? "Sheet1" : sheetname, data } }, msgs));
       msgs.report(param.thread, funcName);
       return &writeResult;
@@ -895,8 +1001,16 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       DynVar noRows;
       noRows.reset(MAPPING_VAR);
 
+      std::string filename = utf8Arg(filenameVar);
+      auto fileLock = PathLock::tryAcquire(filename, true);
+      if ( !fileLock )
+      {
+        reportError(param.thread, funcName, busyMessage(filename));
+        return &writeResult;
+      }
+
       Messages msgs;
-      writeResult = BitVar(writeWorkbook(utf8Arg(filenameVar), sheetsOf(*data, noRows), msgs));
+      writeResult = BitVar(writeWorkbook(filename, sheetsOf(*data, noRows), msgs));
       msgs.report(param.thread, funcName);
       return &writeResult;
     }
@@ -919,8 +1033,13 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       auto job = std::make_shared<Job>();
       auto names = std::make_shared<DynVar>();
       std::string filename = utf8Arg(filenameVar);
+      job->path = filename;
       job->work = [filename, names](Job &j) { getSheetNames(filename, *names, j.msgs); };
-      job->deliver = [names](Variable &out) { out = *names; };
+      job->deliver = [names](Variable &out, Messages &msgs)
+      {
+        finishNames(*names, msgs);
+        out = *names;
+      };
       if ( !startJob(*this, param, targetExpr, job) )
       {
         reportError(param.thread, funcName, "no worker thread available");
@@ -952,12 +1071,17 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       auto job = std::make_shared<Job>();
       auto rows = std::make_shared<DynVar>();
       std::string filename = utf8Arg(filenameVar);
-      std::string sheetname = utf8Arg(sheetnameVar);
+      auto sheetname = std::make_shared<std::string>(utf8Arg(sheetnameVar));
+      job->path = filename;
       job->work = [filename, sheetname, opts, rows](Job &j)
       {
-        readSheet(filename, sheetname, opts, *rows, j.msgs);
+        readSheet(filename, *sheetname, opts, *rows, j.msgs);
       };
-      job->deliver = [rows](Variable &out) { deliverRows(*rows, out); };
+      job->deliver = [filename, sheetname, rows](Variable &out, Messages &msgs)
+      {
+        finishRows(*rows, filename + " [" + *sheetname + "]", msgs);
+        deliverRows(*rows, out);
+      };
       if ( !startJob(*this, param, targetExpr, job) )
       {
         reportError(param.thread, funcName, "no worker thread available");
@@ -987,8 +1111,12 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       auto job = std::make_shared<Job>();
       auto sheets = std::make_shared<SheetResults>();
       std::string filename = utf8Arg(filenameVar);
+      job->path = filename;
       job->work = [filename, opts, sheets](Job &j) { readFile(filename, opts, *sheets, j.msgs); };
-      job->deliver = [sheets](Variable &out) { deliverSheets(*sheets, out); };
+      job->deliver = [filename, sheets](Variable &out, Messages &msgs)
+      {
+        deliverSheets(*sheets, out, filename, msgs);
+      };
       if ( !startJob(*this, param, targetExpr, job) )
       {
         reportError(param.thread, funcName, "no worker thread available");
@@ -1029,11 +1157,13 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       std::string sheetname = utf8Arg(sheetnameVar);
       if ( sheetname.empty() )
         sheetname = "Sheet1";
+      job->path = filename;
+      job->exclusive = true;
       job->work = [filename, sheetname, dataCopy, ok](Job &j)
       {
         *ok = writeWorkbook(filename, SheetList{ { sheetname, dataCopy.get() } }, j.msgs);
       };
-      job->deliver = [ok](Variable &out) { out = BitVar(*ok); };
+      job->deliver = [ok](Variable &out, Messages &) { out = BitVar(*ok); };
       if ( !startJob(*this, param, targetExpr, job) )
       {
         reportError(param.thread, funcName, "no worker thread available");
@@ -1074,6 +1204,8 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
       auto job = std::make_shared<Job>();
       auto ok = std::make_shared<bool>(false);
       std::string filename = utf8Arg(filenameVar);
+      job->path = filename;
+      job->exclusive = true;
       job->work = [filename, dataCopy, ok](Job &j)
       {
         DynVar noRows;
@@ -1081,7 +1213,7 @@ const Variable *ExternHdl::execute(ExecuteParamRec &param)
         *ok = writeWorkbook(filename,
           sheetsOf(*static_cast<const MappingVar *>(dataCopy.get()), noRows), j.msgs);
       };
-      job->deliver = [ok](Variable &out) { out = BitVar(*ok); };
+      job->deliver = [ok](Variable &out, Messages &) { out = BitVar(*ok); };
       if ( !startJob(*this, param, targetExpr, job) )
       {
         reportError(param.thread, funcName, "no worker thread available");

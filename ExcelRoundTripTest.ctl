@@ -27,6 +27,10 @@ bool g_ticking;
 int g_concurrentDone;
 dyn_string g_concurrentFailures;
 
+// excelBusyFileTest / excelAsyncStopWhileWaitingTest: set by helper threads.
+bool g_busyWriterDone;
+bool g_stoppedReaderResumed;
+
 //--------------------------------------------------------------------------------
 /**
 */
@@ -53,6 +57,8 @@ void main()
   recordTest("excelAsyncRoundTripTest", excelAsyncRoundTripTest());
   recordTest("excelAsyncDoesNotBlockTest", excelAsyncDoesNotBlockTest());
   recordTest("excelAsyncConcurrencyTest", excelAsyncConcurrencyTest());
+  recordTest("excelBusyFileTest", excelBusyFileTest());
+  recordTest("excelAsyncStopWhileWaitingTest", excelAsyncStopWhileWaitingTest());
   // Last: passes a dyn where the signature declares a mapping.
   recordTest("excelWriteFileWrongTypeTest", excelWriteFileWrongTypeTest());
 
@@ -917,6 +923,104 @@ bool excelAsyncConcurrencyTest()
   bool pass = g_concurrentDone == 7 && dynlen(g_concurrentFailures) == 0 && finalOk;
   DebugTN("excelAsyncConcurrencyTest", "finished", g_concurrentDone, "failures", g_concurrentFailures,
           "final rows", dynlen(back), "pass", pass);
+  remove(filename);
+  return pass;
+}
+
+// n rows of four columns, large enough that reading or writing takes a while.
+dyn_anytype bigRows(int n)
+{
+  dyn_anytype rows;
+
+  for (int i = 1; i <= n; i++)
+  {
+    dynAppend(rows, makeMapping("Id", i, "Name", "row " + i, "Value", i * 1.5, "Flag", i % 2 == 0));
+  }
+
+  return rows;
+}
+
+void busyWriter(string filename, dyn_anytype rows)
+{
+  bool ok;
+  excelWriteSheetAsync(filename, "Big", rows, ok);
+  g_busyWriterDone = TRUE;
+}
+
+// A blocking call on a file an *Async job is writing fails with a "busy"
+// error instead of freezing the manager until the job is done.
+bool excelBusyFileTest()
+{
+  string filename = getTempFile("excelBusyFileTest");
+
+  if (filename == "") return FALSE;
+
+  // Seed the file, so a read that does not see the lock would succeed.
+  excelWriteSheet(filename, "Big", bigRows(10));
+
+  g_busyWriterDone = FALSE;
+  startThread("busyWriter", filename, bigRows(20000));
+  delay(0, 200); // the worker has taken the file by now
+
+  dyn_mapping rows = excelReadSheet(filename, "Big");
+  dyn_errClass errors = getLastError();
+  bool writerWasRunning = !g_busyWriterDone;
+
+  time deadline = getCurrentTime() + 60;
+
+  while (!g_busyWriterDone && getCurrentTime() < deadline)
+  {
+    delay(0, 20);
+  }
+
+  if (!writerWasRunning)
+  {
+    skipTest("excelBusyFileTest", "the async write finished before the blocking read could observe it");
+    remove(filename);
+    return TRUE;
+  }
+
+  string errText = dynlen(errors) > 0 ? getErrorText(errors[1]) : "";
+  bool pass = dynlen(rows) == 0 && dynlen(errors) > 0;
+  DebugTN("excelBusyFileTest", "rows", dynlen(rows), "error", errText, "pass", pass);
+  remove(filename);
+  return pass;
+}
+
+void stoppableReader(string filename)
+{
+  dyn_mapping rows;
+  excelReadSheetAsync(filename, "Big", rows);
+  g_stoppedReaderResumed = TRUE;
+}
+
+// Stopping a script while it waits for an *Async job must not crash the
+// manager or wedge the worker pool; the stopped script never resumes.
+bool excelAsyncStopWhileWaitingTest()
+{
+  string filename = getTempFile("excelAsyncStopWhileWaitingTest");
+
+  if (filename == "") return FALSE;
+
+  if (!excelWriteSheet(filename, "Big", bigRows(20000)))
+  {
+    DebugTN("excelAsyncStopWhileWaitingTest: excelWriteSheet failed", getLastError());
+    remove(filename);
+    return FALSE;
+  }
+
+  g_stoppedReaderResumed = FALSE;
+  int tid = startThread("stoppableReader", filename);
+  delay(0, 100);
+  stopThread(tid);
+
+  // The abandoned job finishes on its worker meanwhile; a new read must work.
+  dyn_mapping rows;
+  int started = excelReadSheetAsync(filename, "Big", rows);
+
+  bool pass = started == 0 && dynlen(rows) == 20000 && !g_stoppedReaderResumed;
+  DebugTN("excelAsyncStopWhileWaitingTest", "rows", dynlen(rows), "stopped script resumed", g_stoppedReaderResumed,
+          "pass", pass);
   remove(filename);
   return pass;
 }

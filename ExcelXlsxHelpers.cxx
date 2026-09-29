@@ -265,14 +265,12 @@ namespace
     return out;
   }
 
-  // Cell text read from the file: escapes decoded, converted to the project
-  // encoding.
+  // Cell text read from the file, escapes decoded. Stays UTF-8: reads may run
+  // on worker threads, and WinCC OA's encoding converter is only used on the
+  // CTRL thread (convertRowsToProjectEncoding).
   TextVar cellTextVar(const std::string &utf8)
   {
-    std::string decoded = decodeExcelEscapes(utf8);
-    if (Resources::isUtf8Encoding())
-      return TextVar(decoded.c_str()); // skip the CharString round trip
-    return TextVar(ExcelXlsxHelpers::fromUtf8(decoded).c_str());
+    return TextVar(decodeExcelEscapes(utf8).c_str());
   }
 
   // Cell text from project-encoded text via toXmlUtf8; width receives the
@@ -924,9 +922,7 @@ namespace ExcelXlsxHelpers
     // One mapping key per column: the header text, or the 1-based column
     // number when headers are off or a header cell is empty. Repeated
     // headers get a numeric suffix ("Value", "Value_2") so no two columns
-    // share a key and overwrite each other. Duplicates are detected after
-    // conversion to the project encoding, which can merge distinct names
-    // (characters the codepage lacks).
+    // share a key and overwrite each other.
     std::vector<std::unique_ptr<Variable>> keys;
     keys.reserve(colCount);
     uint32_t dataStartRow = 1;
@@ -946,14 +942,11 @@ namespace ExcelXlsxHelpers
           return;
         }
 
-        if (!isRepresentable(name))
-          warnings.push_back("header '" + name + "' in column " + std::to_string(c)
-                             + " cannot be represented in the project encoding");
-
-        std::string projectName = fromUtf8(name).c_str();
-        std::string unique = projectName;
+        // UTF-8 key; convertRowsToProjectEncoding converts it (and resolves
+        // names that collide only after conversion) on the CTRL thread.
+        std::string unique = name;
         for (int n = 2; !seen.insert(unique).second; ++n)
-          unique = projectName + "_" + std::to_string(n);
+          unique = name + "_" + std::to_string(n);
         keys.emplace_back(new TextVar(unique.c_str()));
       });
       dataStartRow = 2;
@@ -1138,6 +1131,56 @@ namespace ExcelXlsxHelpers
           .setWidth(std::min(static_cast<float>(maxWidths[c]) + 2.0f, EXCEL_MAX_COLUMN_WIDTH));
 
     return true;
+  }
+
+  void convertRowsToProjectEncoding(DynVar &rows, std::vector<std::string> &warnings)
+  {
+    if (Resources::isUtf8Encoding())
+      return;
+
+    // Text keys converted once each and de-duplicated after conversion:
+    // characters the codepage lacks can merge distinct UTF-8 names.
+    std::unordered_map<std::string, std::string> keyMap; // UTF-8 -> project
+    std::unordered_set<std::string> usedKeys;
+    auto convertKey = [&](const std::string &utf8) -> const std::string &
+    {
+      auto known = keyMap.find(utf8);
+      if (known != keyMap.end())
+        return known->second;
+
+      if (!isRepresentable(utf8))
+        warnings.push_back("header '" + utf8 + "' cannot be represented in the project encoding");
+
+      std::string base = fromUtf8(utf8).c_str();
+      std::string unique = base;
+      for (int n = 2; !usedKeys.insert(unique).second; ++n)
+        unique = base + "_" + std::to_string(n);
+      return keyMap.emplace(utf8, unique).first->second;
+    };
+
+    for (unsigned int r = 0; r < rows.getNumberOfItems(); r++)
+    {
+      const Variable *rowVar = rows.getAt(r);
+      if (!rowVar || rowVar->isA() != MAPPING_VAR)
+        continue;
+
+      const MappingVar &row = *static_cast<const MappingVar *>(rowVar);
+      MappingVar *converted = new MappingVar;
+      for (unsigned int k = 0; k < row.getNumberOfItems(); k++)
+      {
+        const Variable *key = row.getKey(k);
+        const Variable *value = row.getValue(k);
+
+        Variable *newKey = (key->isA() == TEXT_VAR)
+          ? new TextVar(convertKey(static_cast<const TextVar *>(key)->getValue()).c_str())
+          : key->clone();
+        Variable *newValue = (value->isA() == TEXT_VAR)
+          ? new TextVar(fromUtf8(static_cast<const TextVar *>(value)->getValue()).c_str())
+          : value->clone();
+        converted->setAt(newKey, newValue); // takes ownership
+      }
+      delete rows.replaceAt(r, converted);
+    }
   }
 
   std::string checkSheetNames(std::vector<std::string> &names)
