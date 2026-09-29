@@ -19,7 +19,10 @@ project(CtrlExcelReader)
 # OpenXLSXConfig.cmake does not call find_dependency for its link deps
 find_package(pugixml CONFIG REQUIRED)
 find_package(miniz CONFIG REQUIRED)
-find_package(Boost CONFIG REQUIRED COMPONENTS nowide)
+if ( WIN32 )
+  # The vcpkg port uses Boost.Nowide on Windows only
+  find_package(Boost CONFIG REQUIRED COMPONENTS nowide)
+endif()
 find_package(OpenXLSX CONFIG REQUIRED)
 
 if ( CTRLEXCEL_BUILD_EXTENSION )
