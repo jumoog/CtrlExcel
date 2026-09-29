@@ -380,7 +380,7 @@ namespace
     for ( const auto &sheet : sheets )
       names.push_back(sheet.first);
 
-    std::string nameProblem = ExcelXlsxHelpers::checkSheetNames(names);
+    std::string nameProblem = ExcelXlsxCore::checkSheetNames(names);
     if ( !nameProblem.empty() )
     {
       msgs.add(nameProblem);

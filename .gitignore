@@ -43,3 +43,4 @@
 build
 vcpkg_installed
 /build-linux-relwithdebinfo
+/build-tests

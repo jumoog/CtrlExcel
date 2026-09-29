@@ -242,6 +242,19 @@ Add the extension to your WinCC OA config file:
 LoadCtrlLibs = "CtrlExcelReader"
 ```
 
+## Tests
+
+- **C++ tests** (`tests/ExcelXlsxCoreTest.cxx`) cover the parts that do not need WinCC OA: date conversion, text escaping, sheet-name checks and how OpenXLSX reads numbers, dates and sparse sheets. The normal build compiles them too; run them with `ctest --test-dir build -C RelWithDebInfo --output-on-failure` (Linux: `ctest --test-dir build-linux-relwithdebinfo`). They also build without the WinCC OA API:
+
+  ```sh
+  cmake -S . -B build-tests -DCTRLEXCEL_BUILD_EXTENSION=OFF -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+  cmake --build build-tests --config RelWithDebInfo
+  ctest --test-dir build-tests -C RelWithDebInfo --output-on-failure
+  ```
+
+  GitHub Actions (`.github/workflows/ci.yml`) runs them on Linux and Windows.
+- **CTRL tests** (`ExcelRoundTripTest.ctl`) test the CTRL functions themselves and need a WinCC OA project with the extension loaded. Copy `testdata/CtrlExcelReaderFixture.xlsx` into the project's `data/` directory for the fixture test.
+
 ## Licenses
 
 This extension is licensed under the MIT License (see `LICENSE` file). It uses [OpenXLSX](https://github.com/troldal/OpenXLSX) which is licensed under the BSD 3-Clause License (see `THIRD-PARTY-LICENSES.txt`).

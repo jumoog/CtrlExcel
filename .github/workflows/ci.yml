@@ -1,0 +1,66 @@
+name: CI
+
+# Builds and runs the C++ tests (tests/). The CTRL extension itself needs the
+# proprietary WinCC OA API, which is not available here, so it is not built;
+# ExcelRoundTripTest.ctl still has to be run in a WinCC OA project.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            triplet: x64-linux
+          - os: windows-latest
+            triplet: x64-windows-static-md
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # The runner images ship vcpkg; its built packages are cached per
+      # vcpkg commit, so a runner image update rebuilds them once. No
+      # restore-keys: restoring an older cache would carry its stale archives
+      # into every new cache entry, which then only grows.
+      - name: Set up vcpkg
+        shell: bash
+        run: |
+          # Forward slashes (Windows paths end up in CMake arguments)
+          root="$(printf '%s' "$VCPKG_INSTALLATION_ROOT" | tr '\\' '/')"
+          echo "VCPKG_ROOT=$root" >> "$GITHUB_ENV"
+          echo "VCPKG_COMMIT=$(git -C "$root" rev-parse HEAD)" >> "$GITHUB_ENV"
+          cache="$(printf '%s' "$RUNNER_TEMP" | tr '\\' '/')/vcpkg-cache"
+          mkdir -p "$cache"
+          echo "VCPKG_DEFAULT_BINARY_CACHE=$cache" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v6
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-${{ matrix.triplet }}-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
+
+      - name: Configure
+        shell: bash
+        run: >
+          cmake -S . -B build
+          -DCTRLEXCEL_BUILD_EXTENSION=OFF
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+          -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
+
+      - name: Build
+        run: cmake --build build --config RelWithDebInfo --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C RelWithDebInfo --output-on-failure

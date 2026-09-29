@@ -1,22 +1,19 @@
 cmake_minimum_required(VERSION 3.15)
 
-set(API_ROOT "$ENV{API_ROOT}" CACHE FILEPATH "directory of the WinCC_OA API installation")
-include(${API_ROOT}/CMakeDefines.txt)
+# Without the (proprietary) WinCC OA API only the tests are built, e.g. in CI:
+# cmake -DCTRLEXCEL_BUILD_EXTENSION=OFF
+option(CTRLEXCEL_BUILD_EXTENSION "Build the CTRL extension (needs the WinCC OA API in API_ROOT)" ON)
+option(CTRLEXCEL_BUILD_TESTS "Build the C++ tests (tests/)" ON)
 
-project(CtrlExcelReader)
-
-set(TARGET CtrlExcelReader)
-
-set(SOURCES
-ExternHdl.cxx
-ExcelXlsxHelpers.cxx
-)
-
-if ( WIN32 )
-  set (SOURCES ${SOURCES} VersInfo.rc)
+if ( CTRLEXCEL_BUILD_EXTENSION )
+  set(API_ROOT "$ENV{API_ROOT}" CACHE FILEPATH "directory of the WinCC_OA API installation")
+  include(${API_ROOT}/CMakeDefines.txt)
+else()
+  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CXX_STANDARD_REQUIRED ON)
 endif()
 
-add_ctrlext(${TARGET} ${SOURCES})
+project(CtrlExcelReader)
 
 # --- OpenXLSX (Excel reader / writer) ----------------------------------------
 # OpenXLSXConfig.cmake does not call find_dependency for its link deps
@@ -25,7 +22,28 @@ find_package(miniz CONFIG REQUIRED)
 find_package(Boost CONFIG REQUIRED COMPONENTS nowide)
 find_package(OpenXLSX CONFIG REQUIRED)
 
-# Worker threads of the *Async functions (std::thread needs -pthread on Linux)
-find_package(Threads REQUIRED)
+if ( CTRLEXCEL_BUILD_EXTENSION )
+  # Worker threads of the *Async functions (std::thread needs -pthread on Linux)
+  find_package(Threads REQUIRED)
 
-target_link_libraries(${TARGET} OpenXLSX::OpenXLSX Threads::Threads)
+  set(TARGET CtrlExcelReader)
+
+  set(SOURCES
+  ExternHdl.cxx
+  ExcelXlsxHelpers.cxx
+  ExcelXlsxCore.cxx
+  )
+
+  if ( WIN32 )
+    set (SOURCES ${SOURCES} VersInfo.rc)
+  endif()
+
+  add_ctrlext(${TARGET} ${SOURCES})
+
+  target_link_libraries(${TARGET} OpenXLSX::OpenXLSX Threads::Threads)
+endif()
+
+if ( CTRLEXCEL_BUILD_TESTS )
+  enable_testing()
+  add_subdirectory(tests)
+endif()
