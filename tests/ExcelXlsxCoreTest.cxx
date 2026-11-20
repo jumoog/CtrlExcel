@@ -450,10 +450,13 @@ void headerTextTest()
 
   std::vector<std::string> headers;
   std::vector<bool> exists;
-  forEachCell(wks, 1, wks.columnCount(), [&](uint16_t, XLCell *cell)
+  forEachRow(wks, 1, 1, [&](const SheetRow &row)
   {
-    exists.push_back(cell != nullptr);
-    headers.push_back(cell ? headerText(*cell, styles, dateCache, state) : std::string());
+    forEachCell(row, wks.columnCount(), [&](uint16_t, XLCell *cell)
+    {
+      exists.push_back(cell != nullptr);
+      headers.push_back(cell ? headerText(*cell, styles, dateCache, state) : std::string());
+    });
   });
 
   CHECK_EQ(headers.size(), size_t(10));
@@ -473,7 +476,38 @@ void headerTextTest()
   doc.close();
 }
 
-// forEachCell must not create the cells and rows it skips.
+void referenceColumnTest()
+{
+  CHECK_EQ(referenceColumn("A1"), uint16_t(1));
+  CHECK_EQ(referenceColumn("Z9"), uint16_t(26));
+  CHECK_EQ(referenceColumn("AA1"), uint16_t(27));
+  CHECK_EQ(referenceColumn("AZ1"), uint16_t(52));
+  CHECK_EQ(referenceColumn("XFD1048576"), uint16_t(16384));
+  CHECK_EQ(referenceColumn("XFE1"), uint16_t(0));
+  CHECK_EQ(referenceColumn("ZZZZZ1"), uint16_t(0));
+  CHECK_EQ(referenceColumn("B"), uint16_t(2));
+  CHECK_EQ(referenceColumn("1"), uint16_t(0));
+  CHECK_EQ(referenceColumn("a1"), uint16_t(0));
+  CHECK_EQ(referenceColumn(""), uint16_t(0));
+  CHECK_EQ(referenceColumn(nullptr), uint16_t(0));
+}
+
+// Row numbers visited by forEachRow, each followed by its cell pattern
+// ('x' = cell, '.' = none), e.g. "1:x.x 3:.x".
+std::string rowPattern(XLWorksheet &wks, uint32_t firstRow, uint32_t lastRow, uint16_t colCount)
+{
+  std::string pattern;
+  forEachRow(wks, firstRow, lastRow, [&](const SheetRow &row)
+  {
+    if (!pattern.empty())
+      pattern += ' ';
+    pattern += std::to_string(row.number) + (row.hidden ? "h:" : ":");
+    forEachCell(row, colCount, [&](uint16_t, XLCell *cell) { pattern += cell ? 'x' : '.'; });
+  });
+  return pattern;
+}
+
+// forEachRow / forEachCell must not create the cells and rows they skip.
 void sparseSheetTest()
 {
   TempFile file("sparse");
@@ -494,26 +528,70 @@ void sparseSheetTest()
   CHECK_EQ(wks.rowCount(), uint32_t(500));
   CHECK_EQ(wks.columnCount(), uint16_t(3));
 
-  auto existing = [&](uint32_t row)
-  {
-    std::string pattern;
-    forEachCell(wks, row, 3, [&](uint16_t, XLCell *cell) { pattern += cell ? 'x' : '.'; });
-    return pattern;
-  };
-  CHECK_EQ(existing(1), std::string("x.x"));
-  CHECK_EQ(existing(1), std::string("x.x")); // B1 still not created
-  CHECK_EQ(existing(500), std::string(".x."));
+  CHECK_EQ(rowPattern(wks, 1, 1, 3), std::string("1:x.x"));
+  CHECK_EQ(rowPattern(wks, 1, 1, 3), std::string("1:x.x")); // B1 still not created
+  CHECK_EQ(rowPattern(wks, 2, 499, 3), std::string());
+  CHECK_EQ(rowPattern(wks, 500, 500, 3), std::string("500:.x."));
+  CHECK_EQ(rowPattern(wks, 1, 500, 1), std::string("1:x 500:.")); // colCount cuts off
+  CHECK_EQ(rowPattern(wks, 1, 500, 5), std::string("1:x.x.. 500:.x..."));
 
-  size_t visited = 0, present = 0;
-  XLRowRange rows = wks.rows(1, wks.rowCount());
-  for (auto it = rows.begin(); it != rows.end(); ++it)
+  size_t rows = 0;
+  for (XMLNode row = sheetDataNode(wks).first_child_of_type(pugi::node_element); !row.empty();
+       row = row.next_sibling_of_type(pugi::node_element))
+    ++rows;
+  CHECK_EQ(rows, size_t(2)); // nothing was created
+  CHECK_EQ(wks.rowCount(), uint32_t(500));
+  SheetExtent extent = sheetExtent(wks);
+  CHECK_EQ(extent.rows, uint32_t(500));
+  CHECK_EQ(extent.columns, uint16_t(3));
+  doc.close();
+}
+
+// The r attributes of rows and cells are optional in the file format: an
+// element without one follows the previous one. Elements that do not ascend
+// are skipped, other children of a row (<extLst>) ignored.
+void implicitReferenceTest()
+{
+  TempFile file("implicit");
+  XLDocument doc;
+  doc.create(file.name(), XLForceOverwrite);
+  auto wks = doc.workbook().worksheet(1);
+  wks.cell("A1").value() = 1;
+  wks.cell("B1").value() = 2;
+  wks.cell("D1").value() = 4;
+  wks.cell("A2").value() = 5;
+  wks.cell("C4").value() = 6;
+  wks.cell("A6").value() = 7;
+  wks.row(6).setHidden(true);
+
+  XMLNode sheetData = sheetDataNode(wks);
+  XMLNode row1 = sheetData.first_child_of_type(pugi::node_element);
+  XMLNode row2 = row1.next_sibling_of_type(pugi::node_element);
+  XMLNode row4 = row2.next_sibling_of_type(pugi::node_element);
+  XMLNode cellB1 = row1.first_child_of_type(pugi::node_element).next_sibling_of_type(pugi::node_element);
+  XMLNode cellD1 = cellB1.next_sibling_of_type(pugi::node_element);
+  cellB1.remove_attribute("r");          // still B1
+  cellD1.remove_attribute("r");          // now C1
+  row1.append_child("extLst");
+  row2.remove_attribute("r");            // still row 2
+  row4.attribute("r").set_value(2);      // does not ascend: skipped
+
+  CHECK_EQ(rowPattern(wks, 1, 10, 4), std::string("1:xxx. 2:x... 6h:x..."));
+  SheetExtent extent = sheetExtent(wks); // D1 is now C1, row 4 is skipped
+  CHECK_EQ(extent.rows, uint32_t(6));
+  CHECK_EQ(extent.columns, uint16_t(3));
+  CHECK_EQ(rowPattern(wks, 2, 5, 4), std::string("2:x..."));
+
+  std::vector<int64_t> values;
+  forEachRow(wks, 1, 1, [&](const SheetRow &row)
   {
-    ++visited;
-    if (it.rowExists())
-      ++present;
-  }
-  CHECK_EQ(visited, size_t(500));
-  CHECK_EQ(present, size_t(2)); // rowExists() did not create rows 2..499
+    forEachCell(row, 4, [&](uint16_t, XLCell *cell)
+    {
+      if (cell)
+        values.push_back(cell->value().get<int64_t>());
+    });
+  });
+  CHECK(values == std::vector<int64_t>({1, 2, 4}));
   doc.close();
 }
 
@@ -599,9 +677,27 @@ void fixtureTest()
   }
   // Row 11 only carries formatting; it exists but has no cells.
   {
-    std::string pattern;
-    forEachCell(wks, 11, 2, [&](uint16_t, XLCell *cell) { pattern += cell ? 'x' : '.'; });
-    CHECK_EQ(pattern, std::string(".."));
+    CHECK_EQ(rowPattern(wks, 11, 11, 2), std::string("11:.."));
+  }
+  // Sheet "Implicit": row 3 missing, rows 5 and 6 and some cells without r,
+  // row 5 ends in <extLst> (which made OpenXLSX's noexcept columnCount() throw).
+  {
+    auto implicit = doc.workbook().worksheet("Implicit");
+    SheetExtent extent = sheetExtent(implicit);
+    CHECK_EQ(extent.rows, uint32_t(6));
+    CHECK_EQ(extent.columns, uint16_t(2));
+    CHECK_EQ(rowPattern(implicit, 1, 6, 2), std::string("1:xx 2:xx 4:xx 5:xx 6:xx"));
+
+    std::vector<int64_t> values;
+    forEachRow(implicit, 2, 6, [&](const SheetRow &row)
+    {
+      forEachCell(row, 2, [&](uint16_t c, XLCell *cell)
+      {
+        if (c == 1 && cell)
+          values.push_back(cell->value().get<int64_t>());
+      });
+    });
+    CHECK(values == std::vector<int64_t>({1, 2, 3, 4}));
   }
   doc.close();
 }
@@ -630,7 +726,9 @@ int main(int argc, char *argv[])
 #endif
     {"numberRoundTripTest", numberRoundTripTest},
     {"headerTextTest", headerTextTest},
+    {"referenceColumnTest", referenceColumnTest},
     {"sparseSheetTest", sparseSheetTest},
+    {"implicitReferenceTest", implicitReferenceTest},
     {"fixtureTest", fixtureTest},
   };
 

@@ -8,6 +8,7 @@
 #include <climits>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <ctime>
 #include <string>
 #include <unordered_map>
@@ -21,6 +22,7 @@
 #define ssize_t OpenXLSX_ssize_t
 #endif
 #include <OpenXLSX.hpp>
+#include <headers/XLXmlParser.hpp> // XMLNode, for forEachRow / forEachCell
 #ifdef _WIN32
 #undef ssize_t
 #endif
@@ -164,20 +166,119 @@ namespace ExcelXlsxCore
                          std::unordered_map<OpenXLSX::XLStyleIndex, bool> &dateCache,
                          ReadState &state);
 
-  // Call fn(columnIndex, cell) for columns 1..colCount of an existing row,
-  // with cell == nullptr where the row has no cell. Dereferencing OpenXLSX
-  // cell iterators creates missing cells in the XML (and rows().cells()
-  // visits every position), which for a sheet with a stray cell far out
-  // (row 1048576, column XFD) would materialise millions of nodes.
-  template <typename Fn>
-  void forEachCell(OpenXLSX::XLWorksheet &wks, uint32_t row, uint16_t colCount, Fn &&fn)
+  // Column number (1-based) of a cell reference such as "AB12"; 0 if it does
+  // not start with a column (uppercase letters) of at most XFD.
+  uint16_t referenceColumn(const char *ref);
+
+  // The worksheet's <sheetData> element and the shared strings its cells refer
+  // to. OpenXLSX keeps the sheet XML protected; see forEachRow for why the
+  // reader walks it directly.
+  OpenXLSX::XMLNode sheetDataNode(OpenXLSX::XLWorksheet &wks);
+  const OpenXLSX::XLSharedStrings &sheetSharedStrings(OpenXLSX::XLWorksheet &wks);
+
+  // A <row> element of the sheet XML.
+  struct SheetRow
   {
-    OpenXLSX::XLCellRange range = wks.range(OpenXLSX::XLCellReference(row, 1),
-                                            OpenXLSX::XLCellReference(row, colCount));
-    uint16_t c = 0;
-    for (auto it = range.begin(); it != range.end(); ++it, ++c)
-      fn(c, it.cellExists() ? &*it : nullptr);
+    OpenXLSX::XMLNode node;
+    const OpenXLSX::XLSharedStrings *sharedStrings;
+    uint32_t number; // 1-based
+    bool hidden;
+  };
+
+  // Call fn(const SheetRow &) for every row stored in the sheet with
+  // firstRow <= number <= lastRow, in order; missing rows are neither visited
+  // nor created. OpenXLSX locates a row by walking the row list from its
+  // start or end on every lookup (wks.range(), wks.cell(), the first step of
+  // every iterator), so reading a sheet row by row that way is quadratic
+  // (100000 rows took 75 s). Its iterators also create the rows and cells
+  // they visit, which for a stray cell far out (row 1048576, column XFD)
+  // would materialise millions of nodes. One pass over the XML avoids both.
+  // Rows are stored in ascending order (OpenXLSX relies on that as well); a
+  // row without the optional r attribute follows the previous one, and a row
+  // that does not ascend is skipped.
+  template <typename Fn>
+  void forEachRow(OpenXLSX::XLWorksheet &wks, uint32_t firstRow, uint32_t lastRow, Fn &&fn)
+  {
+    const OpenXLSX::XLSharedStrings &strings = sheetSharedStrings(wks);
+    uint32_t number = 0;
+    for (OpenXLSX::XMLNode node = sheetDataNode(wks).first_child_of_type(pugi::node_element);
+         !node.empty(); node = node.next_sibling_of_type(pugi::node_element))
+    {
+      uint32_t r = node.attribute("r").as_uint(0);
+      if (r == 0)
+        r = number + 1;
+      else if (r <= number)
+        continue;
+      number = r;
+      if (number < firstRow)
+        continue;
+      if (number > lastRow)
+        break;
+      fn(SheetRow{node, &strings, number, node.attribute("hidden").as_bool(false)});
+    }
   }
+
+  // Call fn(column, cellNode) for the <c> elements of a row, in order, with
+  // their 1-based column, until fn returns false. A cell without the optional
+  // r attribute follows the previous one; one that does not ascend is
+  // skipped, as is everything after column XFD.
+  template <typename Fn>
+  void forEachCellNode(const SheetRow &row, Fn &&fn)
+  {
+    unsigned previous = 0; // column of the previous <c>
+    for (OpenXLSX::XMLNode node = row.node.first_child_of_type(pugi::node_element);
+         !node.empty(); node = node.next_sibling_of_type(pugi::node_element))
+    {
+      if (std::strcmp(node.name(), "c") != 0) // e.g. <extLst>
+        continue;
+      unsigned column = referenceColumn(node.attribute("r").value());
+      if (column == 0)
+        column = previous + 1;
+      else if (column <= previous)
+        continue;
+      if (column > OpenXLSX::MAX_COLS)
+        break;
+      previous = column;
+      if (!fn(static_cast<uint16_t>(column), node))
+        break;
+    }
+  }
+
+  // Call fn(columnIndex, cell) for columns 1..colCount of a row, with
+  // cell == nullptr where the row has no cell (columnIndex is 0-based).
+  // Linear in the row's cells, creates nothing.
+  template <typename Fn>
+  void forEachCell(const SheetRow &row, uint16_t colCount, Fn &&fn)
+  {
+    uint16_t done = 0; // columns handed to fn
+    forEachCellNode(row, [&](uint16_t column, const OpenXLSX::XMLNode &node)
+    {
+      if (column > colCount)
+        return false;
+      while (++done < column)
+        fn(static_cast<uint16_t>(done - 1), static_cast<OpenXLSX::XLCell *>(nullptr));
+      OpenXLSX::XLCell cell(node, *row.sharedStrings);
+      fn(static_cast<uint16_t>(done - 1), &cell);
+      return done < colCount;
+    });
+    while (done < colCount)
+    {
+      ++done;
+      fn(static_cast<uint16_t>(done - 1), static_cast<OpenXLSX::XLCell *>(nullptr));
+    }
+  }
+
+  // Number of the last row and highest column of a sheet, by the rules of
+  // forEachRow / forEachCellNode. Replaces XLWorksheet::rowCount() (the r of
+  // the last row: 0 if that row omits it) and columnCount(), which is
+  // noexcept yet throws, i.e. terminates the process, for a row whose last
+  // element is a <c> without r or an <extLst>.
+  struct SheetExtent
+  {
+    uint32_t rows = 0;
+    uint16_t columns = 0;
+  };
+  SheetExtent sheetExtent(OpenXLSX::XLWorksheet &wks);
 
   // names are UTF-8; converts them to valid UTF-8 in place. Returns an empty
   // string if Excel accepts every name, otherwise the first problem found.

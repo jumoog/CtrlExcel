@@ -57,10 +57,67 @@ namespace
       return ExcelXlsxCore::ReadState::OFFSET_VARIES;
     return unixDay * ExcelXlsxCore::DAY_SECONDS + secOfDay - static_cast<long long>(t);
   }
+
+  // XLXmlFile::xmlDocument() and parentDoc() are protected, and OpenXLSX
+  // offers no public way to walk a sheet's rows and cells without its
+  // per-lookup row search. A derived class may form pointers to protected
+  // members (named through itself) and apply them to any XLXmlFile.
+  struct XmlFileAccess : XLXmlFile
+  {
+    static XMLDocument &document(XLXmlFile &file)
+    {
+      XMLDocument &(XLXmlFile::*get)() = &XmlFileAccess::xmlDocument;
+      return (file.*get)();
+    }
+
+    static const XLDocument &parent(const XLXmlFile &file)
+    {
+      const XLDocument &(XLXmlFile::*get)() const = &XmlFileAccess::parentDoc;
+      return (file.*get)();
+    }
+  };
 }
 
 namespace ExcelXlsxCore
 {
+  uint16_t referenceColumn(const char *ref)
+  {
+    unsigned column = 0;
+    for (const char *p = ref; p && *p >= 'A' && *p <= 'Z'; ++p)
+    {
+      column = column * 26 + static_cast<unsigned>(*p - 'A' + 1);
+      if (column > MAX_COLS)
+        return 0;
+    }
+    return static_cast<uint16_t>(column);
+  }
+
+  XMLNode sheetDataNode(XLWorksheet &wks)
+  {
+    return XmlFileAccess::document(wks).document_element().child("sheetData");
+  }
+
+  const XLSharedStrings &sheetSharedStrings(XLWorksheet &wks)
+  {
+    return XmlFileAccess::parent(wks).sharedStrings();
+  }
+
+  SheetExtent sheetExtent(XLWorksheet &wks)
+  {
+    SheetExtent extent;
+    forEachRow(wks, 1, MAX_ROWS, [&](const SheetRow &row)
+    {
+      extent.rows = row.number;
+      forEachCellNode(row, [&](uint16_t column, const XMLNode &)
+      {
+        if (column > extent.columns)
+          extent.columns = column;
+        return true;
+      });
+    });
+    return extent;
+  }
+
   long long daysFromCivil(long long y, unsigned m, unsigned d)
   {
     y -= m <= 2;

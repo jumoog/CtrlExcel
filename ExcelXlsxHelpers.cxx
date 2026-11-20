@@ -280,8 +280,9 @@ namespace ExcelXlsxHelpers
                      bool useHeaders, bool skipHidden, bool skipEmpty,
                      std::vector<std::string> &warnings)
   {
-    uint32_t rowCount = wks.rowCount();
-    uint16_t colCount = wks.columnCount();
+    const SheetExtent extent = sheetExtent(wks);
+    uint32_t rowCount = extent.rows;
+    uint16_t colCount = extent.columns;
 
     if (rowCount == 0 || colCount == 0)
       return;
@@ -304,22 +305,25 @@ namespace ExcelXlsxHelpers
     if (useHeaders)
     {
       std::unordered_set<std::string> seen;
-      forEachCell(wks, 1, colCount, [&](uint16_t index, XLCell *cell)
+      forEachRow(wks, 1, 1, [&](const SheetRow &header)
       {
-        const uint16_t c = static_cast<uint16_t>(index + 1);
-        std::string name = cell ? headerText(*cell, styles, dateCache, state) : std::string();
-        if (name.empty())
+        forEachCell(header, colCount, [&](uint16_t index, XLCell *cell)
         {
-          keys.emplace_back(new IntegerVar(c));
-          return;
-        }
+          const uint16_t c = static_cast<uint16_t>(index + 1);
+          std::string name = cell ? headerText(*cell, styles, dateCache, state) : std::string();
+          if (name.empty())
+          {
+            keys.emplace_back(new IntegerVar(c));
+            return;
+          }
 
-        // UTF-8 key; convertRowsToProjectEncoding converts it (and resolves
-        // names that collide only after conversion) on the CTRL thread.
-        std::string unique = name;
-        for (int n = 2; !seen.insert(unique).second; ++n)
-          unique = name + "_" + std::to_string(n);
-        keys.emplace_back(new TextVar(unique.c_str()));
+          // UTF-8 key; convertRowsToProjectEncoding converts it (and resolves
+          // names that collide only after conversion) on the CTRL thread.
+          std::string unique = name;
+          for (int n = 2; !seen.insert(unique).second; ++n)
+            unique = name + "_" + std::to_string(n);
+          keys.emplace_back(new TextVar(unique.c_str()));
+        });
       });
       dataStartRow = 2;
     }
@@ -327,7 +331,6 @@ namespace ExcelXlsxHelpers
     for (uint16_t c = static_cast<uint16_t>(keys.size()) + 1; c <= colCount; ++c)
       keys.emplace_back(new IntegerVar(c));
 
-    // Header-only sheet: rows(2, 1) would still yield one bogus row.
     if (dataStartRow > rowCount)
       return;
 
@@ -338,24 +341,21 @@ namespace ExcelXlsxHelpers
       for (const auto &key : keys)
         emptyRow.setAt(*key, TextVar(""));
 
-    // Only rows that exist in the XML are visited cell by cell (see
-    // forEachCell); rowExists() does not create missing rows.
-    XLRowRange rows = wks.rows(dataStartRow, rowCount);
-    for (auto it = rows.begin(); it != rows.end(); ++it)
+    // Only rows that exist in the XML are visited (see forEachRow).
+    uint32_t nextRow = dataStartRow;
+    forEachRow(wks, dataStartRow, rowCount, [&](const SheetRow &row)
     {
-      if (!it.rowExists())
-      {
-        if (!skipEmpty)
+      if (!skipEmpty)
+        for (; nextRow < row.number; ++nextRow)
           result.append(emptyRow);
-        continue;
-      }
+      nextRow = row.number + 1;
 
-      if (skipHidden && it->isHidden())
-        continue;
+      if (skipHidden && row.hidden)
+        return;
 
       MappingVar rowMap;
       bool hasValue = false;
-      forEachCell(wks, it.rowNumber(), colCount, [&](uint16_t c, XLCell *cell)
+      forEachCell(row, colCount, [&](uint16_t c, XLCell *cell)
       {
         if (cell)
           hasValue = setTypedCellCached(rowMap, *keys[c], *cell, styles, dateCache, state) || hasValue;
@@ -363,11 +363,11 @@ namespace ExcelXlsxHelpers
           rowMap.setAt(*keys[c], TextVar(""));
       });
 
-      // rowCount() includes rows that only carry formatting (fill, height);
+      // The extent includes rows that only carry formatting (fill, height);
       // by default rows without any value are not records.
       if (hasValue || !skipEmpty)
         result.append(rowMap);
-    }
+    });
 
     if (state.unrepresentableDates > 0)
       warnings.push_back(std::to_string(state.unrepresentableDates)

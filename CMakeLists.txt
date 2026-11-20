@@ -43,7 +43,8 @@ if ( CTRLEXCEL_BUILD_EXTENSION )
 
   add_ctrlext(${TARGET} ${SOURCES})
 
-  target_link_libraries(${TARGET} OpenXLSX::OpenXLSX Threads::Threads)
+  # pugixml directly too: ExcelXlsxCore walks the sheet XML (forEachRow)
+  target_link_libraries(${TARGET} OpenXLSX::OpenXLSX pugixml::pugixml Threads::Threads)
 endif()
 
 if ( CTRLEXCEL_BUILD_TESTS )

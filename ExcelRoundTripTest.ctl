@@ -29,6 +29,7 @@ dyn_string g_concurrentFailures;
 
 // excelBusyFileTest / excelAsyncStopWhileWaitingTest: set by helper threads.
 bool g_busyWriterDone;
+bool g_stoppedReaderStarted;
 bool g_stoppedReaderResumed;
 
 //--------------------------------------------------------------------------------
@@ -713,6 +714,33 @@ bool excelFixtureTest()
   if (getType(byLabel["bigint"]) != FLOAT_VAR || byLabel["bigint"] < 1.2e19) dynAppend(failed, "bigint");
   if (byLabel["after"] != "last") dynAppend(failed, "after");
 
+  // Sheet "Implicit": Excel row 3 is missing, rows 5 and 6 and some cells
+  // omit the optional r attribute, row 5 ends in <extLst>.
+  dyn_mapping implicitRows = excelReadSheet(filename, "Implicit");
+  dyn_errClass implicitErrors = getLastError();
+  dyn_int values;
+
+  for (int i = 1; i <= dynlen(implicitRows); i++)
+  {
+    dynAppend(values, implicitRows[i]["Value"]);
+  }
+
+  if (dynlen(implicitErrors) > 0) dynAppend(failed, "implicit: errors");
+  if (values != makeDynInt(1, 2, 3, 4)) dynAppend(failed, "implicit: values");
+
+  if (dynlen(implicitRows) == 4
+      && (implicitRows[3]["Label"] != "implicitRow" || implicitRows[4]["Label"] != "implicitCell"))
+    dynAppend(failed, "implicit: labels");
+
+  // With skipEmptyRows = FALSE the missing row is an empty one, so rows[i]
+  // stays Excel row i + 1.
+  dyn_mapping padded = excelReadSheet(filename, "Implicit", TRUE, TRUE, FALSE);
+
+  if (dynlen(padded) != 5) dynAppend(failed, "implicit: padded row count " + dynlen(padded));
+  else if (padded[2]["Label"] != "" || padded[2]["Value"] != "" || padded[3]["Label"] != "afterGap"
+           || padded[5]["Value"] != 4)
+    dynAppend(failed, "implicit: padded rows");
+
   bool pass = dynlen(failed) == 0;
 
   if (!pass)
@@ -819,14 +847,9 @@ bool excelAsyncDoesNotBlockTest()
 
   if (filename == "") return FALSE;
 
-  dyn_anytype rows;
+  const int ROWS = 100000;
 
-  for (int i = 1; i <= 20000; i++)
-  {
-    dynAppend(rows, makeMapping("Id", i, "Name", "row " + i, "Value", i * 1.5, "Flag", i % 2 == 0));
-  }
-
-  if (!excelWriteSheet(filename, "Big", rows))
+  if (!excelWriteSheet(filename, "Big", slowReadRows(ROWS)))
   {
     DebugTN("excelAsyncDoesNotBlockTest: excelWriteSheet failed", getLastError());
     remove(filename);
@@ -851,7 +874,7 @@ bool excelAsyncDoesNotBlockTest()
   // Expect roughly one tick per 10 ms of reading; require a clear majority
   // of that so a slow machine does not fail the test.
   int expected = seconds * 100;
-  bool pass = started == 0 && dynlen(back) == 20000 && back[20000]["Id"] == 20000
+  bool pass = started == 0 && dynlen(back) == ROWS && back[ROWS]["Id"] == ROWS
               && ticksDuring >= expected / 2 && ticksDuring >= 2;
   DebugTN("excelAsyncDoesNotBlockTest", "read seconds", seconds, "ticks during read", ticksDuring,
           "rows", dynlen(back), "pass", pass);
@@ -940,6 +963,21 @@ dyn_anytype bigRows(int n)
   return rows;
 }
 
+// n rows for tests that need a read to take a while (100000 rows: a few
+// hundred ms). One repeated text: OpenXLSX's write searches all earlier
+// strings for every text cell, so unique texts would make writing slow.
+dyn_anytype slowReadRows(int n)
+{
+  dyn_anytype rows;
+
+  for (int i = 1; i <= n; i++)
+  {
+    dynAppend(rows, makeMapping("Id", i, "Name", "row", "Value", i * 1.5, "Flag", i % 2 == 0));
+  }
+
+  return rows;
+}
+
 void busyWriter(string filename, dyn_anytype rows)
 {
   bool ok;
@@ -990,6 +1028,7 @@ bool excelBusyFileTest()
 void stoppableReader(string filename)
 {
   dyn_mapping rows;
+  g_stoppedReaderStarted = TRUE;
   excelReadSheetAsync(filename, "Big", rows);
   g_stoppedReaderResumed = TRUE;
 }
@@ -998,27 +1037,47 @@ void stoppableReader(string filename)
 // manager or wedge the worker pool; the stopped script never resumes.
 bool excelAsyncStopWhileWaitingTest()
 {
+  const int ROWS = 100000;
   string filename = getTempFile("excelAsyncStopWhileWaitingTest");
 
   if (filename == "") return FALSE;
 
-  if (!excelWriteSheet(filename, "Big", bigRows(20000)))
+  if (!excelWriteSheet(filename, "Big", slowReadRows(ROWS)))
   {
     DebugTN("excelAsyncStopWhileWaitingTest: excelWriteSheet failed", getLastError());
     remove(filename);
     return FALSE;
   }
 
+  g_stoppedReaderStarted = FALSE;
   g_stoppedReaderResumed = FALSE;
   int tid = startThread("stoppableReader", filename);
+  time deadline = getCurrentTime() + 10;
+
+  while (!g_stoppedReaderStarted && getCurrentTime() < deadline)
+  {
+    delay(0, 1);
+  }
+
+  // The flag is set just before excelReadSheetAsync, which queues the job
+  // and waits at once; 100 ms is ample for that and far below the read time.
   delay(0, 100);
+
+  // A read that finished already cannot be stopped while waiting.
+  if (g_stoppedReaderResumed)
+  {
+    skipTest("excelAsyncStopWhileWaitingTest", "the async read finished before the script could be stopped");
+    remove(filename);
+    return TRUE;
+  }
+
   stopThread(tid);
 
   // The abandoned job finishes on its worker meanwhile; a new read must work.
   dyn_mapping rows;
   int started = excelReadSheetAsync(filename, "Big", rows);
 
-  bool pass = started == 0 && dynlen(rows) == 20000 && !g_stoppedReaderResumed;
+  bool pass = started == 0 && dynlen(rows) == ROWS && !g_stoppedReaderResumed;
   DebugTN("excelAsyncStopWhileWaitingTest", "rows", dynlen(rows), "stopped script resumed", g_stoppedReaderResumed,
           "pass", pass);
   remove(filename);

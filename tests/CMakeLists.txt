@@ -10,7 +10,7 @@ set(CTRLEXCEL_FIXTURE ${PROJECT_SOURCE_DIR}/testdata/CtrlExcelReaderFixture.xlsx
 configure_file(FixturePath.hxx.in FixturePath.hxx @ONLY)
 
 target_include_directories(ExcelXlsxCoreTest PRIVATE ${PROJECT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
-target_link_libraries(ExcelXlsxCoreTest PRIVATE OpenXLSX::OpenXLSX)
+target_link_libraries(ExcelXlsxCoreTest PRIVATE OpenXLSX::OpenXLSX pugixml::pugixml)
 
 if ( MSVC )
   target_compile_options(ExcelXlsxCoreTest PRIVATE /W4 /utf-8)
