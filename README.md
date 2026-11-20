@@ -220,14 +220,16 @@ if (dynlen(err) > 0)
 
 ## Performance
 
-Reading and writing take time in proportion to the sheet size. Measured inside a CTRL manager on Windows 11 (`excelWriteSheet` and `excelReadSheet`, best of three runs, 10 columns of integers, floats, texts, times and booleans with one distinct text per row), against the previous version, which used OpenXLSX:
+Reading and writing take time in proportion to the sheet size. Measured inside a CTRL manager on Windows 11 (`excelWriteSheet` and `excelReadSheet`, best of three runs, 10 columns of integers, floats, texts, times and booleans with one distinct text per row), against the earlier versions, which used OpenXLSX:
 
-| Rows × columns | Write, OpenXLSX | Write, now | Read, OpenXLSX | Read, now |
-|---|---:|---:|---:|---:|
-| 10,000 × 10 | 0.18 s | 0.08 s | 0.10 s | 0.09 s |
-| 100,000 × 10 | 1.77 s | 0.83 s | 1.12 s | 0.87 s |
+| Sheet (rows × columns) | OpenXLSX | OpenXLSX, quadratic lookups worked around | Now (calamine / rust_xlsxwriter) |
+|---|---:|---:|---:|
+| Write 10,000 × 10 | 0.30 s¹ | 0.18 s | 0.08 s |
+| Write 100,000 × 10 | 20.6 s¹ | 1.77 s | 0.83 s |
+| Read 10,000 × 10 | 0.51 s¹ | 0.10 s | 0.09 s |
+| Read 100,000 × 10 | 75 s¹ | 1.12 s | 0.87 s |
 
-Before OpenXLSX's quadratic row lookups were worked around, reading 100,000 rows had taken 75 s and writing them 20 s.
+¹ OpenXLSX searched all rows for every row it read and all texts for every text it wrote, so the time grew with the square of the sheet size. Measured with a standalone benchmark of the read and write paths, without the conversion from and into CTRL variables, so inside a CTRL manager it took even longer.
 
 ## Build
 
