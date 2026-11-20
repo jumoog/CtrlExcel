@@ -182,6 +182,21 @@ if (dynlen(err) > 0)
   DebugTN("excelReadSheet failed", err);
 ```
 
+## Performance
+
+Reading now goes through the sheet once instead of looking up every row from the start or end of the sheet, so the read time grows linearly with the sheet size instead of quadratically. Large sheets read up to 130 times faster:
+
+| Sheet (rows × columns) | Before | Now | Speed-up |
+|---|---:|---:|---:|
+| 10,000 × 10 | 0.51 s | 0.06 s | 9× |
+| 50,000 × 10 | 14.0 s | 0.28 s | 50× |
+| 100,000 × 10 | 75 s | 0.58 s | 130× |
+| 2,000 × 500 | 0.51 s | 0.34 s | 1.5× |
+
+Measured on Windows 11 with a Release build of the extension's read path in a standalone benchmark (mixed integers, floats, texts, dates and booleans), without the conversion into CTRL variables. Inside a CTRL manager, `excelReadSheet` on 100,000 rows × 4 columns takes about 0.3 s.
+
+Writing is unchanged: OpenXLSX compares every text with all texts written before it, so writing many *distinct* texts slows down as the sheet grows (100,000 rows with a unique text per row: about 20 s). Numbers, dates, booleans and repeated texts are not affected.
+
 ## Build
 
 ### Prerequisites
