@@ -229,10 +229,17 @@ namespace
       bool exclusive_;
   };
 
-  std::string busyMessage(const std::string &filename)
+  // The file's lock for a blocking function, or nullptr after reporting that
+  // an ...Async call of another script holds it.
+  std::unique_ptr<PathLock> lockFile(CtrlThread *thread, const char *funcName,
+                                     const std::string &filename, bool exclusive)
   {
-    return filename + ": file is busy (an ...Async call of another script is reading or writing it); "
-                      "retry later, or use the ...Async variant, which waits without blocking";
+    std::unique_ptr<PathLock> lock = PathLock::tryAcquire(filename, exclusive);
+    if ( !lock )
+      reportError(thread, funcName,
+        filename + ": file is busy (an ...Async call of another script is reading or writing it); "
+                   "retry later, or use the ...Async variant, which waits without blocking");
+    return lock;
   }
 
   //----------------------------------------------------------------------------
@@ -438,8 +445,8 @@ namespace
     return true;
   }
 
-  // Rows argument of excelWriteSheet; owned is set to a copy when the caller
-  // needs one (async: the script's variable may change while the worker runs).
+  // Rows argument of excelWriteSheet, not copied (the async variant clones
+  // it); nullptr if it could not be evaluated, which writeWorkbook reports.
   const Variable *evalWriteSheetData(CtrlExpr *expr, CtrlThread *thread)
   {
     return expr ? expr->evaluate(thread) : nullptr;
@@ -770,12 +777,16 @@ namespace
   }
 
   // Queue the job and suspend the calling script until it is done. False
-  // (nothing queued, script not suspended) if no worker thread can run it.
+  // (nothing queued, script not suspended) after reporting it if no worker
+  // thread can run it.
   bool startJob(const ExcelExternHdl &hdl, const BaseExternHdl::ExecuteParamRec &param,
                 CtrlExpr *targetExpr, std::shared_ptr<Job> job)
   {
     if ( !WorkerPool::instance().submit(job) )
+    {
+      reportError(param.thread, param.funcName.c_str(), "no worker thread available");
       return false;
+    }
 
     param.thread->setWaitCond(new JobWait(job, hdl, param, targetExpr));
     return true;
@@ -831,12 +842,9 @@ const Variable *ExcelExternHdl::execute(ExecuteParamRec &param)
       }
 
       std::string filename = utf8Arg(filenameVar);
-      auto fileLock = PathLock::tryAcquire(filename, false);
+      auto fileLock = lockFile(param.thread, funcName, filename, false);
       if ( !fileLock )
-      {
-        reportError(param.thread, funcName, busyMessage(filename));
         return &dynTextResult;
-      }
 
       Messages msgs;
       getSheetNames(filename, dynTextResult, msgs);
@@ -866,12 +874,9 @@ const Variable *ExcelExternHdl::execute(ExecuteParamRec &param)
       }
 
       std::string filename = utf8Arg(filenameVar);
-      auto fileLock = PathLock::tryAcquire(filename, false);
+      auto fileLock = lockFile(param.thread, funcName, filename, false);
       if ( !fileLock )
-      {
-        reportError(param.thread, funcName, busyMessage(filename));
         return &dynMappingResult;
-      }
 
       Messages msgs;
       std::string sheetname = utf8Arg(sheetnameVar);
@@ -900,12 +905,9 @@ const Variable *ExcelExternHdl::execute(ExecuteParamRec &param)
       }
 
       std::string filename = utf8Arg(filenameVar);
-      auto fileLock = PathLock::tryAcquire(filename, false);
+      auto fileLock = lockFile(param.thread, funcName, filename, false);
       if ( !fileLock )
-      {
-        reportError(param.thread, funcName, busyMessage(filename));
         return &mappingResult;
-      }
 
       Messages msgs;
       SheetResults sheets;
@@ -938,12 +940,9 @@ const Variable *ExcelExternHdl::execute(ExecuteParamRec &param)
       std::string sheetname = utf8Arg(sheetnameVar);
 
       std::string filename = utf8Arg(filenameVar);
-      auto fileLock = PathLock::tryAcquire(filename, true);
+      auto fileLock = lockFile(param.thread, funcName, filename, true);
       if ( !fileLock )
-      {
-        reportError(param.thread, funcName, busyMessage(filename));
         return &writeResult;
-      }
 
       Messages msgs;
       writeResult = BitVar(writeWorkbook(filename,
@@ -978,12 +977,9 @@ const Variable *ExcelExternHdl::execute(ExecuteParamRec &param)
       noRows.reset(MAPPING_VAR);
 
       std::string filename = utf8Arg(filenameVar);
-      auto fileLock = PathLock::tryAcquire(filename, true);
+      auto fileLock = lockFile(param.thread, funcName, filename, true);
       if ( !fileLock )
-      {
-        reportError(param.thread, funcName, busyMessage(filename));
         return &writeResult;
-      }
 
       Messages msgs;
       writeResult = BitVar(writeWorkbook(filename, sheetsOf(*data, noRows), msgs));
@@ -1016,12 +1012,7 @@ const Variable *ExcelExternHdl::execute(ExecuteParamRec &param)
         finishNames(*names, msgs);
         out = *names;
       };
-      if ( !startJob(*this, param, targetExpr, job) )
-      {
-        reportError(param.thread, funcName, "no worker thread available");
-        return &asyncRejected;
-      }
-      return &asyncStarted;
+      return startJob(*this, param, targetExpr, job) ? &asyncStarted : &asyncRejected;
     }
 
     // -------------------------------------------------------------------------
@@ -1058,12 +1049,7 @@ const Variable *ExcelExternHdl::execute(ExecuteParamRec &param)
         finishRows(*rows, filename + " [" + *sheetname + "]", msgs);
         deliverRows(*rows, out);
       };
-      if ( !startJob(*this, param, targetExpr, job) )
-      {
-        reportError(param.thread, funcName, "no worker thread available");
-        return &asyncRejected;
-      }
-      return &asyncStarted;
+      return startJob(*this, param, targetExpr, job) ? &asyncStarted : &asyncRejected;
     }
 
     // -------------------------------------------------------------------------
@@ -1093,12 +1079,7 @@ const Variable *ExcelExternHdl::execute(ExecuteParamRec &param)
       {
         deliverSheets(*sheets, out, filename, msgs);
       };
-      if ( !startJob(*this, param, targetExpr, job) )
-      {
-        reportError(param.thread, funcName, "no worker thread available");
-        return &asyncRejected;
-      }
-      return &asyncStarted;
+      return startJob(*this, param, targetExpr, job) ? &asyncStarted : &asyncRejected;
     }
 
     // -------------------------------------------------------------------------
@@ -1140,12 +1121,7 @@ const Variable *ExcelExternHdl::execute(ExecuteParamRec &param)
         *ok = writeWorkbook(filename, SheetList{ { sheetname, dataCopy.get() } }, j.msgs);
       };
       job->deliver = [ok](Variable &out, Messages &) { out = BitVar(*ok); };
-      if ( !startJob(*this, param, targetExpr, job) )
-      {
-        reportError(param.thread, funcName, "no worker thread available");
-        return &asyncRejected;
-      }
-      return &asyncStarted;
+      return startJob(*this, param, targetExpr, job) ? &asyncStarted : &asyncRejected;
     }
 
     // -------------------------------------------------------------------------
@@ -1190,12 +1166,7 @@ const Variable *ExcelExternHdl::execute(ExecuteParamRec &param)
           sheetsOf(*static_cast<const MappingVar *>(dataCopy.get()), noRows), j.msgs);
       };
       job->deliver = [ok](Variable &out, Messages &) { out = BitVar(*ok); };
-      if ( !startJob(*this, param, targetExpr, job) )
-      {
-        reportError(param.thread, funcName, "no worker thread available");
-        return &asyncRejected;
-      }
-      return &asyncStarted;
+      return startJob(*this, param, targetExpr, job) ? &asyncStarted : &asyncRejected;
     }
 
     // -------------------------------------------------------------------------

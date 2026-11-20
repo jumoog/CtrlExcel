@@ -4,7 +4,9 @@
 //! one is complete. A symbolic link is followed (the file it points to is
 //! replaced), and the replaced file's permissions are kept on Unix.
 
-use rust_xlsxwriter::{DocProperties, Format, Formula, Workbook, Worksheet, XlsxError};
+use rust_xlsxwriter::{
+    DocProperties, Format, Formula, IntoExcelData, Workbook, Worksheet, XlsxError,
+};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -81,29 +83,38 @@ impl Writer {
         Ok(())
     }
 
-    fn current(&mut self) -> Result<(&mut Worksheet, &Format, &Format), String> {
+    /// The sheet added last, with the format of style. One call borrows both
+    /// (the workbook mutably, the formats immutably).
+    fn target(&mut self, style: Style) -> Result<(&mut Worksheet, Option<&Format>), String> {
         let index = self.sheet.ok_or_else(|| "no worksheet added".to_string())?;
         let sheet = self.book.worksheet_from_index(index).map_err(message)?;
-        Ok((sheet, &self.header, &self.datetime))
-    }
-
-    fn format<'f>(style: Style, header: &'f Format, datetime: &'f Format) -> Option<&'f Format> {
-        match style {
+        let format = match style {
             Style::Default => None,
-            Style::Header => Some(header),
-            Style::DateTime => Some(datetime),
-        }
+            Style::Header => Some(&self.header),
+            Style::DateTime => Some(&self.datetime),
+        };
+        Ok((sheet, format))
     }
 
-    pub fn text(&mut self, row: u32, column: u32, text: &str, style: Style) -> Result<(), String> {
+    fn write(
+        &mut self,
+        row: u32,
+        column: u32,
+        value: impl IntoExcelData,
+        style: Style,
+    ) -> Result<(), String> {
         let (r, c) = position(row, column)?;
-        let (sheet, header, datetime) = self.current()?;
-        match Self::format(style, header, datetime) {
-            Some(format) => sheet.write_string_with_format(r, c, text, format),
-            None => sheet.write_string(r, c, text),
+        let (sheet, format) = self.target(style)?;
+        match format {
+            Some(format) => sheet.write_with_format(r, c, value, format),
+            None => sheet.write(r, c, value),
         }
         .map(|_| ())
         .map_err(message)
+    }
+
+    pub fn text(&mut self, row: u32, column: u32, text: &str, style: Style) -> Result<(), String> {
+        self.write(row, column, text, style)
     }
 
     /// Non-finite values become the error #NUM!, as Excel shows for them.
@@ -114,20 +125,16 @@ impl Writer {
         value: f64,
         style: Style,
     ) -> Result<(), String> {
-        let (r, c) = position(row, column)?;
-        let (sheet, header, datetime) = self.current()?;
-        if !value.is_finite() {
-            return sheet
-                .write_formula(r, c, Formula::new("=#NUM!").set_result("#NUM!"))
-                .map(|_| ())
-                .map_err(message);
+        if value.is_finite() {
+            self.write(row, column, value, style)
+        } else {
+            self.write(
+                row,
+                column,
+                Formula::new("=#NUM!").set_result("#NUM!"),
+                Style::Default,
+            )
         }
-        match Self::format(style, header, datetime) {
-            Some(format) => sheet.write_number_with_format(r, c, value, format),
-            None => sheet.write_number(r, c, value),
-        }
-        .map(|_| ())
-        .map_err(message)
     }
 
     pub fn boolean(
@@ -137,20 +144,13 @@ impl Writer {
         value: bool,
         style: Style,
     ) -> Result<(), String> {
-        let (r, c) = position(row, column)?;
-        let (sheet, header, datetime) = self.current()?;
-        match Self::format(style, header, datetime) {
-            Some(format) => sheet.write_boolean_with_format(r, c, value, format),
-            None => sheet.write_boolean(r, c, value),
-        }
-        .map(|_| ())
-        .map_err(message)
+        self.write(row, column, value, style)
     }
 
     /// Width in characters, capped at Excel's maximum.
     pub fn column_width(&mut self, column: u32, width: f64) -> Result<(), String> {
         let (_, c) = position(1, column)?;
-        let (sheet, _, _) = self.current()?;
+        let (sheet, _) = self.target(Style::Default)?;
         sheet
             .set_column_width(c, width.clamp(0.0, MAX_COLUMN_WIDTH))
             .map(|_| ())

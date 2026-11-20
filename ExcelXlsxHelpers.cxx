@@ -64,6 +64,12 @@ namespace ExcelXlsxHelpers
 
 namespace
 {
+  // "<what> exceeds 32767 characters", Excel's per-cell limit.
+  std::string tooLong(const char *what)
+  {
+    return std::string(what) + " exceeds " + std::to_string(EXCEL_MAX_CELL_CHARS) + " characters";
+  }
+
   // Cell text from project-encoded text, as valid UTF-8; width receives the
   // length in characters. False if the text exceeds Excel's per-cell limit.
   bool toCellText(const char *projectText, std::string &out, size_t &width)
@@ -336,6 +342,14 @@ namespace
     if (!val)
       return true;
 
+    // Every numeric type is written as a double.
+    auto number = [&](double v)
+    {
+      out.number(row, column, v);
+      width = numberWidth(v);
+      return true;
+    };
+
     switch (val->isA())
     {
       case INTEGER_VAR:
@@ -345,9 +359,7 @@ namespace
         int64_t v = (val->isA() == INTEGER_VAR)
           ? static_cast<int64_t>(static_cast<const IntegerVar *>(val)->getValue())
           : static_cast<int64_t>(static_cast<const LongVar *>(val)->getValue());
-        out.number(row, column, static_cast<double>(v));
-        width = numberWidth(static_cast<double>(v));
-        return true;
+        return number(static_cast<double>(v));
       }
       case UINTEGER_VAR:
       case ULONG_VAR:
@@ -357,17 +369,10 @@ namespace
         uint64_t v = (val->isA() == UINTEGER_VAR)
           ? static_cast<uint64_t>(static_cast<const UIntegerVar *>(val)->getValue())
           : static_cast<uint64_t>(static_cast<const ULongVar *>(val)->getValue());
-        out.number(row, column, static_cast<double>(v));
-        width = numberWidth(static_cast<double>(v));
-        return true;
+        return number(static_cast<double>(v));
       }
       case FLOAT_VAR:
-      {
-        double v = static_cast<const FloatVar *>(val)->getValue();
-        out.number(row, column, v);
-        width = numberWidth(v);
-        return true;
-      }
+        return number(static_cast<const FloatVar *>(val)->getValue());
       case BIT_VAR:
         out.boolean(row, column, static_cast<const BitVar *>(val)->isTrue());
         width = 5; // "FALSE"
@@ -398,7 +403,7 @@ namespace
         std::string text;
         if (!toCellText(str.c_str(), text, width))
         {
-          problem = "text exceeds " + std::to_string(EXCEL_MAX_CELL_CHARS) + " characters";
+          problem = tooLong("text");
           return false;
         }
         out.text(row, column, text);
@@ -486,7 +491,7 @@ namespace ExcelXlsxHelpers
       CharString name = keys[c]->formatValue(CharString());
       if (!toCellText(name.c_str(), headerNames[c], maxWidths[c]))
       {
-        error = "column header exceeds " + std::to_string(EXCEL_MAX_CELL_CHARS) + " characters";
+        error = tooLong("column header");
         return false;
       }
       out.text(1, static_cast<uint32_t>(c + 1), headerNames[c], CellStyle::Header);

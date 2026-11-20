@@ -215,9 +215,17 @@ pub unsafe extern "C" fn cxlsx_writer_free(writer: *mut Writer) {
     }
 }
 
-/// SAFETY: writer is NULL or from cxlsx_writer_new, used by one thread.
-unsafe fn writer_arg<'a>(writer: *mut Writer) -> Result<&'a mut Writer, String> {
-    writer.as_mut().ok_or_else(|| "writer is NULL".to_string())
+/// Runs f on the writer; false after reporting its error or panic.
+fn with_writer(
+    writer: *mut Writer,
+    error: *const cxlsx_error,
+    f: impl FnOnce(&mut Writer) -> Result<(), String>,
+) -> bool {
+    guarded(error, false, || {
+        // SAFETY: writer is NULL or from cxlsx_writer_new, used by one thread
+        let writer = unsafe { writer.as_mut() }.ok_or_else(|| "writer is NULL".to_string())?;
+        f(writer).map(|_| true)
+    })
 }
 
 fn style_arg(style: u32) -> Result<Style, String> {
@@ -231,11 +239,10 @@ pub unsafe extern "C" fn cxlsx_writer_add_sheet(
     name_len: usize,
     error: *const cxlsx_error,
 ) -> bool {
-    guarded(error, false, || {
+    with_writer(writer, error, |w| {
         // SAFETY: as documented in the header
-        let (writer, name) =
-            unsafe { (writer_arg(writer)?, text_arg(name, name_len, "sheet name")?) };
-        writer.add_sheet(name).map(|_| true)
+        let name = unsafe { text_arg(name, name_len, "sheet name") }?;
+        w.add_sheet(name)
     })
 }
 
@@ -249,12 +256,10 @@ pub unsafe extern "C" fn cxlsx_writer_text(
     style: u32,
     error: *const cxlsx_error,
 ) -> bool {
-    guarded(error, false, || {
+    with_writer(writer, error, |w| {
         // SAFETY: as documented in the header
-        let (writer, text) = unsafe { (writer_arg(writer)?, text_arg(text, text_len, "text")?) };
-        writer
-            .text(row, column, text, style_arg(style)?)
-            .map(|_| true)
+        let text = unsafe { text_arg(text, text_len, "text") }?;
+        w.text(row, column, text, style_arg(style)?)
     })
 }
 
@@ -267,12 +272,8 @@ pub unsafe extern "C" fn cxlsx_writer_number(
     style: u32,
     error: *const cxlsx_error,
 ) -> bool {
-    guarded(error, false, || {
-        // SAFETY: as documented in the header
-        let writer = unsafe { writer_arg(writer)? };
-        writer
-            .number(row, column, value, style_arg(style)?)
-            .map(|_| true)
+    with_writer(writer, error, |w| {
+        w.number(row, column, value, style_arg(style)?)
     })
 }
 
@@ -285,12 +286,8 @@ pub unsafe extern "C" fn cxlsx_writer_bool(
     style: u32,
     error: *const cxlsx_error,
 ) -> bool {
-    guarded(error, false, || {
-        // SAFETY: as documented in the header
-        let writer = unsafe { writer_arg(writer)? };
-        writer
-            .boolean(row, column, value, style_arg(style)?)
-            .map(|_| true)
+    with_writer(writer, error, |w| {
+        w.boolean(row, column, value, style_arg(style)?)
     })
 }
 
@@ -301,11 +298,7 @@ pub unsafe extern "C" fn cxlsx_writer_column_width(
     width: f64,
     error: *const cxlsx_error,
 ) -> bool {
-    guarded(error, false, || {
-        // SAFETY: as documented in the header
-        let writer = unsafe { writer_arg(writer)? };
-        writer.column_width(column, width).map(|_| true)
-    })
+    with_writer(writer, error, |w| w.column_width(column, width))
 }
 
 #[no_mangle]
@@ -315,9 +308,9 @@ pub unsafe extern "C" fn cxlsx_writer_save(
     path_len: usize,
     error: *const cxlsx_error,
 ) -> bool {
-    guarded(error, false, || {
+    with_writer(writer, error, |w| {
         // SAFETY: as documented in the header
-        let (writer, path) = unsafe { (writer_arg(writer)?, text_arg(path, path_len, "path")?) };
-        writer.save(Path::new(path)).map(|_| true)
+        let path = unsafe { text_arg(path, path_len, "path") }?;
+        w.save(Path::new(path))
     })
 }
