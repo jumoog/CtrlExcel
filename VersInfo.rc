@@ -1,52 +1,49 @@
+// Version resource of CtrlExcelReader.dll (Properties > Details in Explorer,
+// or (Get-Item CtrlExcelReader.dll).VersionInfo in PowerShell).
+// CtrlExcelVersion.h is generated on every build by cmake/VersionInfo.cmake:
+// the version comes from vcpkg.json, the revision from git, so the
+// ProductVersion (e.g. "1.0.0+a5f43da") names the commit a DLL was built from.
+
 #include <windows.h>
-
-#ifndef PVI_FILE_NAME_INTERN
-#define PVI_FILE_NAME_INTERN PVI_FILE_NAME
-#endif
-
-#ifndef PVI_COMMENT
-#define PVI_COMMENT ""
-#endif
-
-#ifndef PVI_TRADEMARKS
-#define PVI_TRADEMARKS ""
-#endif
+#include "CtrlExcelVersion.h"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,0,0,0
- PRODUCTVERSION 1,0,0,0
- FILEFLAGSMASK 0x3fL
-#ifdef _DEBUG
- FILEFLAGS 0x1L
+ FILEVERSION    CTRLEXCEL_VERSION_MAJOR,CTRLEXCEL_VERSION_MINOR,CTRLEXCEL_VERSION_PATCH,0
+ PRODUCTVERSION CTRLEXCEL_VERSION_MAJOR,CTRLEXCEL_VERSION_MINOR,CTRLEXCEL_VERSION_PATCH,0
+ FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+#if defined(_DEBUG) && CTRLEXCEL_DIRTY
+ FILEFLAGS      VS_FF_DEBUG | VS_FF_PRIVATEBUILD
+#elif defined(_DEBUG)
+ FILEFLAGS      VS_FF_DEBUG
+#elif CTRLEXCEL_DIRTY
+ FILEFLAGS      VS_FF_PRIVATEBUILD
 #else
- FILEFLAGS 0x0L
+ FILEFLAGS      0
 #endif
- FILEOS 0x40004L
- FILETYPE 0x2L
- FILESUBTYPE 0x0L
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_DLL
+ FILESUBTYPE    VFT2_UNKNOWN
 BEGIN
     BLOCK "StringFileInfo"
     BEGIN
-        BLOCK "000904b0"
+        BLOCK "040904b0" // U.S. English, Unicode
         BEGIN
-            VALUE "Comments", "Example comment\0"
-            VALUE "CompanyName", "Example company\0"
-            VALUE "FileDescription", "WinCC OA _TEMPLATE_ CTRL extension\0"
-            VALUE "FileVersion", "1.0.0\0"
-            VALUE "InternalName", "Ctrl_TEMPLATE_\0"
-            VALUE "LegalCopyright", "LegalCopyright", "(c) Example company 20xx\0"
-            VALUE "LegalTrademarks", "Trademark\0"
-            VALUE "OriginalFilename", "Ctrl_TEMPLATE_.dll\0"
-            VALUE "PrivateBuild", "\0"
-            VALUE "ProductName", "\0"
-            VALUE "ProductVersion", "\0"
-            VALUE "SpecialBuild", "\0"
-            VALUE "CompanyUrl", "\0"
-            VALUE "ProductUrl", "\0"
+            VALUE "CompanyName",      "Kilian von Pflugk"
+            VALUE "FileDescription",  "WinCC OA CTRL extension: read and write Excel .xlsx files"
+            VALUE "FileVersion",      CTRLEXCEL_VERSION
+            VALUE "InternalName",     "CtrlExcelReader"
+            VALUE "LegalCopyright",   "Copyright (c) 2026 Kilian von Pflugk, MIT License"
+            VALUE "OriginalFilename", "CtrlExcelReader.dll"
+            VALUE "ProductName",      "CtrlExcelReader"
+            VALUE "ProductVersion",   CTRLEXCEL_PRODUCT_VERSION
+            VALUE "Comments",         CTRLEXCEL_COMMENTS
+#if CTRLEXCEL_DIRTY
+            VALUE "PrivateBuild",     "Built with uncommitted changes"
+#endif
         END
     END
     BLOCK "VarFileInfo"
     BEGIN
-        VALUE "Translation", 0x0009, 1200
+        VALUE "Translation", 0x0409, 1200
     END
 END
