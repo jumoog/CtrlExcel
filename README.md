@@ -314,7 +314,7 @@ ctrlDLL = "CtrlExcelReader"
 
 ### Build and test on Linux in Docker
 
-`docker/` builds the extension against the WinCC OA API on Debian and runs all tests: the Rust tests, the C++ tests, `ExcelRoundTripTest.ctl` and `ExcelWorkbookTest.ctl`, in a throw-away project with a CTRL manager that does not connect to Data/Event (`WCCOActrl -n`), so no database, PMON or license setup is needed.
+`docker/` builds the extension against the WinCC OA API on Debian or RHEL and runs all tests: the Rust tests, the C++ tests, `ExcelRoundTripTest.ctl` and `ExcelWorkbookTest.ctl`, in a throw-away project with a CTRL manager that does not connect to Data/Event (`WCCOActrl -n`), so no database, PMON or license setup is needed.
 
 1. Build the WinCC OA image with the Dockerfile that comes with the WinCC OA Debian packages (it is not part of this repository):
 
@@ -330,6 +330,16 @@ ctrlDLL = "CtrlExcelReader"
    ```
 
    The volume `ctrlexcel-build` keeps the build (`/build/cmake/CtrlExcelReader.so`) and the CTRL test logs (`/build/ExcelRoundTripTest.log`, `/build/ExcelWorkbookTest.log`); `ctrlexcel-cargo` caches the downloaded Rust crates and `ctrlexcel-rustup` the Rust toolchain of `rust/rust-toolchain.toml`, which the container installs on its first run. The container exits with 0 only if everything built without warnings and every test passed. On Windows, use `-v "C:/path/to/CtrlExcel:/src:ro"`.
+
+For **RHEL**, whose packages come without a Dockerfile, `docker/winccoa-rhel/Dockerfile` builds the WinCC OA image (RHEL 10 compatible AlmaLinux with the CodeMeter, Base, BaseServer and APIcpp packages); the build-and-test image is the same:
+
+```sh
+docker build -t winccoa321-rhel:3.21.7 -f docker/winccoa-rhel/Dockerfile path/to/WinCCOA-3.21.7-rhel.x86_64
+docker build -t ctrlexcel-build-rhel --build-arg BASE_IMAGE=winccoa321-rhel:3.21.7 docker
+docker run --rm -v "$PWD:/src:ro" -v ctrlexcel-build-rhel:/build -v ctrlexcel-cargo:/home/winccoa/.cargo/registry -v ctrlexcel-rustup:/home/winccoa/.rustup ctrlexcel-build-rhel
+```
+
+The Debian build needs glibc 2.34 and the RHEL build glibc 2.39 (RHEL 10); use the one built for the distribution the project runs on.
 
 ## Licenses
 

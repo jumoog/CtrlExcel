@@ -1,22 +1,25 @@
-# Build and test image for CtrlExcelReader on Linux: the WinCC OA image
-# (built from Siemens' Dockerfile in the WinCC OA Debian package directory)
-# plus a C++ and a Rust toolchain. See README.md, "Build and test on Linux in Docker".
+# Build and test image for CtrlExcelReader on Linux: a WinCC OA image plus a
+# C++ and a Rust toolchain. See README.md, "Build and test on Linux in Docker".
+# The WinCC OA image is either Debian (Siemens' Dockerfile in the Debian
+# package directory) or RHEL (docker/winccoa-rhel/Dockerfile):
 #
 #   docker build -t ctrlexcel-build --build-arg BASE_IMAGE=winccoa321:3.21.7 docker
+#   docker build -t ctrlexcel-build-rhel --build-arg BASE_IMAGE=winccoa321-rhel:3.21.7 docker
 ARG BASE_IMAGE=winccoa321:3.21.7
 FROM ${BASE_IMAGE}
 
 USER root
 
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-        build-essential \
-        ca-certificates \
-        cmake \
-        curl \
-        git \
-        ninja-build \
- && apt-get clean && rm -rf /var/lib/apt/lists/*
+RUN if command -v apt-get > /dev/null; then \
+      apt-get update \
+      && apt-get install -y --no-install-recommends \
+           build-essential ca-certificates cmake curl git ninja-build \
+      && apt-get clean && rm -rf /var/lib/apt/lists/*; \
+    else \
+      dnf -y install --setopt=install_weak_deps=False \
+           gcc-c++ make binutils ca-certificates cmake git ninja-build \
+      && dnf clean all; \
+    fi
 
 COPY run-tests.sh /usr/local/bin/ctrlexcel-run-tests
 RUN chmod a+rx /usr/local/bin/ctrlexcel-run-tests

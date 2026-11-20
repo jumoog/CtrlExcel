@@ -18,7 +18,7 @@ A WinCC OA CTRL extension (`CtrlExcelReader`) that reads and writes `.xlsx` file
 | `ExcelRoundTripTest.ctl` | CTRL round-trip tests (need a WinCC OA project to run) |
 | `scripts/libs/classes/ExcelWorkbook.ctl` | CTRL++ classes `ExcelWorkbook` (file, load/save, messages, call mode) and `ExcelSheet` (rows in memory) on top of the functions |
 | `ExcelWorkbookTest.ctl` | CTRL tests of those classes |
-| `docker/` | Image on top of the WinCC OA image that builds the extension and runs every test suite on Linux (`run-tests.sh`) |
+| `docker/` | Image on top of a WinCC OA image (Debian from Siemens, or RHEL from `docker/winccoa-rhel/Dockerfile`) that builds the extension and runs every test suite on Linux (`run-tests.sh`); the Dockerfile supports both package managers |
 | `CMakeLists.txt`, `cmake/RustLibrary.cmake`, `CMakePresets.json`, `.github/workflows/ci.yml` | Build (CMake runs cargo), CI; the version is in `CMakeLists.txt` (`project(... VERSION)`) only |
 | `VersInfo.rc`, `cmake/VersionInfo.cmake` | Windows version resource; the script regenerates `CtrlExcelVersion.h` on every build with the git revision, so `ProductVersion` is e.g. `2.0.0+a5f43da` (`-dirty` and `PrivateBuild` for uncommitted changes) |
 | `rust/third_party_licenses.py` | Regenerates `THIRD-PARTY-LICENSES.txt` from `rust/Cargo.lock`; run it after dependency changes |
