@@ -7,45 +7,39 @@
   },
   "configurePresets": [
     {
-      "name": "vs2022-vcpkg",
-      "displayName": "Visual Studio + vcpkg (manifest)",
+      "name": "windows",
+      "displayName": "Visual Studio 2026",
       "generator": "Visual Studio 18 2026",
       "binaryDir": "${sourceDir}/build",
       "architecture": "x64",
       "cacheVariables": {
-        "CMAKE_GENERATOR_INSTANCE": "C:/Program Files/Microsoft Visual Studio/18/Community",
-        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
-        "VCPKG_TARGET_TRIPLET": "x64-windows-static-md"
+        "CMAKE_GENERATOR_INSTANCE": "C:/Program Files/Microsoft Visual Studio/18/Community"
       }
     },
     {
-      "name": "linux-vcpkg-base",
-      "displayName": "Linux + vcpkg (manifest)",
+      "name": "linux-base",
+      "displayName": "Linux",
       "hidden": true,
       "generator": "Unix Makefiles",
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",
         "rhs": "Linux"
-      },
-      "cacheVariables": {
-        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
-        "VCPKG_TARGET_TRIPLET": "x64-linux"
       }
     },
     {
-      "name": "linux-vcpkg-relwithdebinfo",
-      "displayName": "Linux + vcpkg (manifest) - RelWithDebInfo",
-      "inherits": "linux-vcpkg-base",
+      "name": "linux-relwithdebinfo",
+      "displayName": "Linux - RelWithDebInfo",
+      "inherits": "linux-base",
       "binaryDir": "${sourceDir}/build-linux-relwithdebinfo",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo"
       }
     },
     {
-      "name": "linux-vcpkg-debug",
-      "displayName": "Linux + vcpkg (manifest) - Debug",
-      "inherits": "linux-vcpkg-base",
+      "name": "linux-debug",
+      "displayName": "Linux - Debug",
+      "inherits": "linux-base",
       "binaryDir": "${sourceDir}/build-linux-debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug"
@@ -56,24 +50,24 @@
     {
       "name": "relwithdebinfo",
       "displayName": "RelWithDebInfo",
-      "configurePreset": "vs2022-vcpkg",
+      "configurePreset": "windows",
       "configuration": "RelWithDebInfo"
     },
     {
       "name": "debug",
       "displayName": "Debug",
-      "configurePreset": "vs2022-vcpkg",
+      "configurePreset": "windows",
       "configuration": "Debug"
     },
     {
       "name": "linux-relwithdebinfo",
       "displayName": "Linux RelWithDebInfo",
-      "configurePreset": "linux-vcpkg-relwithdebinfo"
+      "configurePreset": "linux-relwithdebinfo"
     },
     {
       "name": "linux-debug",
       "displayName": "Linux Debug",
-      "configurePreset": "linux-vcpkg-debug"
+      "configurePreset": "linux-debug"
     }
   ]
 }

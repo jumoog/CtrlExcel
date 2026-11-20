@@ -1,11 +1,12 @@
 # Writes OUTPUT, the header VersInfo.rc includes: the version (from
-# vcpkg.json, via CMakeLists.txt), the git revision of SOURCE_DIR and the
-# versions of WinCC OA and OpenXLSX. Runs on every build (target
+# CMakeLists.txt), the git revision of SOURCE_DIR and the versions of WinCC
+# OA and the xlsx libraries. Runs on every build (target
 # CtrlExcelVersion), so the revision is current; the header only changes,
 # and the resource is only recompiled, when one of the values does.
 #
 #   cmake -DOUTPUT=... -DSOURCE_DIR=... -DVERSION=1.2.3 -DGIT_EXECUTABLE=...
-#         -DWCCOA_VERSION=3.21 -DOPENXLSX_VERSION=0.5.1 -P VersionInfo.cmake
+#         -DWCCOA_VERSION=3.21 -DCALAMINE_VERSION=0.38.0 -DXLSXWRITER_VERSION=0.103.0
+#         -P VersionInfo.cmake
 
 string(REPLACE "." ";" parts "${VERSION}")
 list(GET parts 0 major)
@@ -40,7 +41,7 @@ file(WRITE "${OUTPUT}.tmp"
 #define CTRLEXCEL_VERSION \"${VERSION}\"
 #define CTRLEXCEL_PRODUCT_VERSION \"${VERSION}+${revision}\"
 #define CTRLEXCEL_DIRTY ${dirty}
-#define CTRLEXCEL_COMMENTS \"CTRL extension for WinCC OA ${WCCOA_VERSION}, built with OpenXLSX ${OPENXLSX_VERSION} from revision ${revision}\"
+#define CTRLEXCEL_COMMENTS \"CTRL extension for WinCC OA ${WCCOA_VERSION}, built with calamine ${CALAMINE_VERSION} and rust_xlsxwriter ${XLSXWRITER_VERSION} from revision ${revision}\"
 ")
 execute_process(COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${OUTPUT}.tmp" "${OUTPUT}")
 file(REMOVE "${OUTPUT}.tmp")

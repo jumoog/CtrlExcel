@@ -1,6 +1,6 @@
-// Tests of ExcelXlsxCore (no WinCC OA API needed). Run through CTest, or
-// directly; an optional argument replaces the path of
-// testdata/CtrlExcelReaderFixture.xlsx.
+// Tests of ExcelXlsxCore and, through it, the xlsx library (no WinCC OA API
+// needed). Run through CTest, or directly; an optional argument replaces the
+// path of testdata/CtrlExcelReaderFixture.xlsx.
 
 #include <ExcelXlsxCore.hxx>
 #include <FixturePath.hxx>
@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <exception>
 #include <filesystem>
@@ -19,7 +20,6 @@
 #include <string>
 #include <vector>
 
-using namespace OpenXLSX;
 using namespace ExcelXlsxCore;
 
 namespace
@@ -77,12 +77,6 @@ namespace
     std::string name() const { return path.u8string(); }
   };
 
-  // cellNumber() of the cell at ref.
-  bool numberAt(XLWorksheet &wks, const char *ref, CellNumber &num)
-  {
-    XLCell cell = wks.cell(ref);
-    return cellNumber(cell, cell.value(), num);
-  }
 }
 
 #define CHECK(cond) report((cond), #cond, __FILE__, __LINE__)
@@ -135,47 +129,20 @@ void utf16LengthTest()
   CHECK_EQ(utf16Length(u8"\U0001F600"), size_t(2));      // surrogate pair
 }
 
-void toXmlUtf8Test()
+void toValidUtf8Test()
 {
-  CHECK_EQ(toXmlUtf8("plain"), std::string("plain"));
-  CHECK_EQ(toXmlUtf8("tab\tlf\n"), std::string("tab\tlf\n"));
-  CHECK_EQ(toXmlUtf8("a\rb"), std::string("a_x000D_b"));
-  CHECK_EQ(toXmlUtf8("\x01" "x"), std::string("_x0001_x"));
-  CHECK_EQ(toXmlUtf8("\xEF\xBF\xBE\xEF\xBF\xBF"), std::string("_xFFFE__xFFFF_"));
-  CHECK_EQ(toXmlUtf8("AB_x0041_7"), std::string("AB_x005F_x0041_7"));
-  CHECK_EQ(toXmlUtf8(u8"ä\U0001F600"), std::string(u8"ä\U0001F600"));
+  CHECK_EQ(toValidUtf8("plain"), std::string("plain"));
+  // Nothing is escaped: the xlsx library escapes what XML cannot hold.
+  CHECK_EQ(toValidUtf8("a\rb\x01"), std::string("a\rb\x01"));
+  CHECK_EQ(toValidUtf8("AB_x0041_7"), std::string("AB_x0041_7"));
+  CHECK_EQ(toValidUtf8(u8"\u00e4\U0001F600"), std::string(u8"\u00e4\U0001F600"));
 
   // Invalid UTF-8 bytes are taken as ISO-8859-1.
-  CHECK_EQ(toXmlUtf8("\xE4"), std::string(u8"ä"));        // Latin-1 ä
-  CHECK_EQ(toXmlUtf8("\xC0\xAF"), std::string("\xC3\x80\xC2\xAF")); // overlong '/'
-  CHECK_EQ(toXmlUtf8("\xED\xA0\x80"), std::string("\xC3\xAD\xC2\xA0\xC2\x80")); // surrogate
-  CHECK_EQ(toXmlUtf8("\xF4\x90\x80\x80"), std::string("\xC3\xB4\xC2\x90\xC2\x80\xC2\x80")); // > U+10FFFF
-  CHECK_EQ(toXmlUtf8("\xC3"), std::string("\xC3\x83"));         // truncated sequence
-
-  // Sheet names: nothing is escaped.
-  CHECK_EQ(toXmlUtf8("a\rb", false), std::string("a\rb"));
-  CHECK_EQ(toXmlUtf8("AB_x0041_7", false), std::string("AB_x0041_7"));
-}
-
-void decodeExcelEscapesTest()
-{
-  CHECK_EQ(decodeExcelEscapes("no escapes"), std::string("no escapes"));
-  CHECK_EQ(decodeExcelEscapes("a_x000D_b"), std::string("a\rb"));
-  CHECK_EQ(decodeExcelEscapes("_X000a_"), std::string("\n"));
-  CHECK_EQ(decodeExcelEscapes("a_x0000_b"), std::string("ab"));
-  CHECK_EQ(decodeExcelEscapes("_x005F_"), std::string("_"));
-  CHECK_EQ(decodeExcelEscapes("_xFFFF_"), std::string("\xEF\xBF\xBF"));
-  // Printable escapes stay verbatim (tools that do not escape store them so).
-  CHECK_EQ(decodeExcelEscapes("AB_x0041_7"), std::string("AB_x0041_7"));
-  CHECK_EQ(decodeExcelEscapes("_x00G1_"), std::string("_x00G1_"));
-  CHECK_EQ(decodeExcelEscapes("_x000D"), std::string("_x000D"));
-
-  const char *texts[] = {
-    "a\rb\r\n", "\x01\x02\x1F", "AB_x0041_7", "_x005F_", "__x000D__",
-    "\xEF\xBF\xBE", u8"ä€\U0001F600", "tab\tlf\n"
-  };
-  for (const char *text : texts)
-    CHECK_EQ(decodeExcelEscapes(toXmlUtf8(text)), std::string(text));
+  CHECK_EQ(toValidUtf8("\xE4"), std::string(u8"\u00e4"));     // Latin-1 a-umlaut
+  CHECK_EQ(toValidUtf8("\xC0\xAF"), std::string("\xC3\x80\xC2\xAF")); // overlong '/'
+  CHECK_EQ(toValidUtf8("\xED\xA0\x80"), std::string("\xC3\xAD\xC2\xA0\xC2\x80")); // surrogate
+  CHECK_EQ(toValidUtf8("\xF4\x90\x80\x80"), std::string("\xC3\xB4\xC2\x90\xC2\x80\xC2\x80")); // > U+10FFFF
+  CHECK_EQ(toValidUtf8("\xC3"), std::string("\xC3\x83"));      // truncated sequence
 }
 
 void foldCaseTest()
@@ -230,21 +197,6 @@ void numberWidthTest()
 //------------------------------------------------------------------------------
 // Date formats and conversion
 //------------------------------------------------------------------------------
-
-void dateFormatTest()
-{
-  for (unsigned id : {14u, 15u, 20u, 22u, 27u, 36u, 45u, 47u})
-    CHECK(isBuiltinDateFormatId(id));
-  for (unsigned id : {0u, 1u, 2u, 13u, 23u, 26u, 37u, 44u, 46u, 49u})
-    CHECK(!isBuiltinDateFormatId(id));
-
-  for (const char *code : {"yyyy-mm-dd", "dd.mm.yyyy hh:mm", "hh:mm:ss", "[$-409]mmm yy",
-                           "[Red]yyyy", "\"Date:\" d"})
-    CHECK(isDateFormatCode(code));
-  for (const char *code : {"General", "0.00", "#,##0", "[h]:mm", "[mm]:ss", "[s]", "[Red]0.00",
-                           "\"days\" 0", "\\d0", "0.00E+00"})
-    CHECK(!isDateFormatCode(code));
-}
 
 void utcTimeTest()
 {
@@ -351,372 +303,139 @@ void dstTimeTest()
 #endif
 
 //------------------------------------------------------------------------------
-// OpenXLSX behaviour the extension relies on
+// Cell values
 //------------------------------------------------------------------------------
 
-// Numbers written by OpenXLSX and read back through cellNumber().
-void numberRoundTripTest()
+void integerFitTest()
 {
-  TempFile file("numbers");
-  {
-    XLDocument doc;
-    doc.create(file.name(), XLForceOverwrite);
-    auto wks = doc.workbook().worksheet(1);
-    wks.cell("A1").value() = 87.0;
-    wks.cell("A2").value() = 1e20;
-    wks.cell("A3").value() = int64_t(5000000000LL);
-    wks.cell("A4").value() = int64_t(-7);
-    wks.cell("A5").value() = 0.25;
-    wks.cell("A6").value() = -3e-7;
-    wks.cell("A7").value() = std::string("text");
-    wks.cell("A8").value() = toXmlUtf8("cr\rlf\n_x0041_");
-    doc.save();
-    doc.close();
-  }
-
-  XLDocument doc;
-  doc.open(file.name());
-  auto wks = doc.workbook().worksheet(1);
-
-  CellNumber num;
-  CHECK(numberAt(wks, "A1", num));
-  CHECK_EQ(num.value, 87.0);
-
-  // "%.17g" writes 1e+20, which OpenXLSX's integer parser reads as 1.
-  num = CellNumber();
-  CHECK(numberAt(wks, "A2", num));
-  CHECK_EQ(num.value, 1e20);
-  CHECK(!num.isInteger);
-
-  num = CellNumber();
-  CHECK(numberAt(wks, "A3", num));
-  CHECK(num.isInteger);
-  CHECK_EQ(num.integer, int64_t(5000000000LL));
-
-  num = CellNumber();
-  CHECK(numberAt(wks, "A4", num));
-  CHECK(num.isInteger);
-  CHECK_EQ(num.integer, int64_t(-7));
-
-  num = CellNumber();
-  CHECK(numberAt(wks, "A5", num));
-  CHECK_EQ(num.value, 0.25);
-
-  num = CellNumber();
-  CHECK(numberAt(wks, "A6", num));
-  CHECK_EQ(num.value, -3e-7);
-
-  num = CellNumber();
-  CHECK(!numberAt(wks, "A7", num));
-
-  XLCell text = wks.cell("A8");
-  CHECK_EQ(decodeExcelEscapes(text.value().get<std::string>()), std::string("cr\rlf\n_x0041_"));
-  doc.close();
+  int64_t i = 0;
+  CHECK(integerFit(87.0, i) == IntegerFit::Int);
+  CHECK_EQ(i, int64_t(87));
+  CHECK(integerFit(-0.0, i) == IntegerFit::Int);
+  CHECK_EQ(i, int64_t(0));
+  CHECK(integerFit(2147483647.0, i) == IntegerFit::Int);
+  CHECK(integerFit(-2147483648.0, i) == IntegerFit::Int);
+  CHECK(integerFit(2147483648.0, i) == IntegerFit::Long);
+  CHECK(integerFit(5000000000.0, i) == IntegerFit::Long);
+  CHECK_EQ(i, int64_t(5000000000LL));
+  CHECK(integerFit(-9223372036854775808.0, i) == IntegerFit::Long);
+  CHECK_EQ(i, std::numeric_limits<int64_t>::min());
+  CHECK(integerFit(9223372036854775808.0, i) == IntegerFit::None); // 2^63
+  CHECK(integerFit(1e20, i) == IntegerFit::None);
+  CHECK(integerFit(0.25, i) == IntegerFit::None);
+  CHECK(integerFit(std::nan(""), i) == IntegerFit::None);
+  CHECK(integerFit(std::numeric_limits<double>::infinity(), i) == IntegerFit::None);
 }
 
-// Header texts of cells as written by OpenXLSX, including date formats.
+cxlsx_cell makeCell(uint32_t type, double number = 0.0, const char *text = nullptr, bool boolean = false)
+{
+  cxlsx_cell cell{};
+  cell.row = 1;
+  cell.column = 1;
+  cell.type = type;
+  cell.number = number;
+  cell.boolean = boolean;
+  cell.text = text;
+  cell.text_len = text ? std::strlen(text) : 0;
+  return cell;
+}
+
 void headerTextTest()
 {
   setTimeZone("UTC0");
-  TempFile file("headers");
-  {
-    XLDocument doc;
-    doc.create(file.name(), XLForceOverwrite);
-    auto wks = doc.workbook().worksheet(1);
-    // The format the writer uses; date-only built-in formats (14) are in the fixture.
-    XLStyleIndex dateTime = createDateTimeFormat(doc);
-
-    wks.cell("A1").value() = std::string("Name");
-    wks.cell("B1").value() = int64_t(2024);
-    wks.cell("C1").value() = 2.5;
-    wks.cell("D1").value() = true;
-    wks.cell("E1").value() = XLDateTime(46023.5);
-    wks.cell("E1").setCellFormat(dateTime);
-    wks.cell("F1").value() = XLDateTime(46023.0);
-    wks.cell("F1").setCellFormat(dateTime); // no time part: date only
-    wks.cell("G1").value() = 0.5; // time-only serial stays a number
-    wks.cell("G1").setCellFormat(dateTime);
-    wks.cell("H1").value() = std::string("a_x000D_b");
-    wks.cell("J1").value() = std::string("far");
-    doc.save();
-    doc.close();
-  }
-
-  XLDocument doc;
-  doc.open(file.name());
-  auto wks = doc.workbook().worksheet(1);
-  XLStyles styles = doc.styles();
-  std::unordered_map<XLStyleIndex, bool> dateCache;
   ReadState state;
+  CHECK_EQ(headerText(makeCell(CXLSX_TEXT, 0, "Name"), state), std::string("Name"));
+  CHECK_EQ(headerText(makeCell(CXLSX_NUMBER, 2024), state), std::string("2024"));
+  CHECK_EQ(headerText(makeCell(CXLSX_NUMBER, 2.5), state), std::string("2.5"));
+  CHECK_EQ(headerText(makeCell(CXLSX_NUMBER, 1e20), state), std::string("1e+20"));
+  CHECK_EQ(headerText(makeCell(CXLSX_BOOL, 0, nullptr, true), state), std::string("TRUE"));
+  CHECK_EQ(headerText(makeCell(CXLSX_DATETIME, 46023.5), state), std::string("2026-01-01 12:00:00"));
+  CHECK_EQ(headerText(makeCell(CXLSX_DATETIME, 46023.0), state), std::string("2026-01-01"));
+  CHECK_EQ(headerText(makeCell(CXLSX_DATETIME, 22037.0), state), std::string("1960-05-01"));
+  // A time-only serial and a duration stay numbers.
+  CHECK_EQ(headerText(makeCell(CXLSX_DATETIME, 0.5), state), std::string("0.5"));
+  CHECK_EQ(headerText(makeCell(CXLSX_DURATION, 1.5), state), std::string("1.5"));
+  CHECK_EQ(headerText(makeCell(CXLSX_ERROR, 0, "#N/A"), state), std::string());
+  CHECK_EQ(headerText(makeCell(CXLSX_UNCACHED_FORMULA), state), std::string());
 
-  std::vector<std::string> headers;
-  std::vector<bool> exists;
-  forEachRow(wks, 1, 1, [&](const SheetRow &row)
+  CHECK(isDateCell(makeCell(CXLSX_DATETIME, 1.0)));
+  CHECK(!isDateCell(makeCell(CXLSX_DATETIME, 0.99)));
+  CHECK(!isDateCell(makeCell(CXLSX_NUMBER, 46023.0)));
+}
+
+//------------------------------------------------------------------------------
+// The xlsx library
+//------------------------------------------------------------------------------
+
+namespace
+{
+  struct RecordedCell
   {
-    forEachCell(row, wks.columnCount(), [&](uint16_t, XLCell *cell)
+    uint32_t row;
+    uint32_t column;
+    uint32_t type;
+    double number;
+    bool boolean;
+    std::string text;
+  };
+
+  // Everything Workbook::readSheet delivers; optionally throws at a cell.
+  struct Recorder : SheetVisitor
+  {
+    uint32_t rows = 0, columns = 0;
+    std::vector<std::pair<uint32_t, bool>> rowList;
+    std::vector<RecordedCell> cells;
+    bool rowBeforeCells = true;
+    size_t throwAt = SIZE_MAX;
+
+    bool begin(uint32_t r, uint32_t c) override
     {
-      exists.push_back(cell != nullptr);
-      headers.push_back(cell ? headerText(*cell, styles, dateCache, state) : std::string());
-    });
-  });
+      rows = r;
+      columns = c;
+      return true;
+    }
 
-  CHECK_EQ(headers.size(), size_t(10));
-  if (headers.size() == 10)
-  {
-    CHECK_EQ(headers[0], std::string("Name"));
-    CHECK_EQ(headers[1], std::string("2024"));
-    CHECK_EQ(headers[2], std::string("2.5"));
-    CHECK_EQ(headers[3], std::string("TRUE"));
-    CHECK_EQ(headers[4], std::string("2026-01-01 12:00:00"));
-    CHECK_EQ(headers[5], std::string("2026-01-01"));
-    CHECK_EQ(headers[6], std::string("0.5"));
-    CHECK_EQ(headers[7], std::string("a\rb"));
-    CHECK(!exists[8]); // I1 was never written
-    CHECK_EQ(headers[9], std::string("far"));
-  }
-  doc.close();
-}
-
-void referenceColumnTest()
-{
-  CHECK_EQ(referenceColumn("A1"), uint16_t(1));
-  CHECK_EQ(referenceColumn("Z9"), uint16_t(26));
-  CHECK_EQ(referenceColumn("AA1"), uint16_t(27));
-  CHECK_EQ(referenceColumn("AZ1"), uint16_t(52));
-  CHECK_EQ(referenceColumn("XFD1048576"), uint16_t(16384));
-  CHECK_EQ(referenceColumn("XFE1"), uint16_t(0));
-  CHECK_EQ(referenceColumn("ZZZZZ1"), uint16_t(0));
-  CHECK_EQ(referenceColumn("B"), uint16_t(2));
-  CHECK_EQ(referenceColumn("1"), uint16_t(0));
-  CHECK_EQ(referenceColumn("a1"), uint16_t(0));
-  CHECK_EQ(referenceColumn(""), uint16_t(0));
-  CHECK_EQ(referenceColumn(nullptr), uint16_t(0));
-}
-
-// Row numbers visited by forEachRow, each followed by its cell pattern
-// ('x' = cell, '.' = none), e.g. "1:x.x 3:.x".
-std::string rowPattern(XLWorksheet &wks, uint32_t firstRow, uint32_t lastRow, uint16_t colCount)
-{
-  std::string pattern;
-  forEachRow(wks, firstRow, lastRow, [&](const SheetRow &row)
-  {
-    if (!pattern.empty())
-      pattern += ' ';
-    pattern += std::to_string(row.number) + (row.hidden ? "h:" : ":");
-    forEachCell(row, colCount, [&](uint16_t, XLCell *cell) { pattern += cell ? 'x' : '.'; });
-  });
-  return pattern;
-}
-
-// forEachRow / forEachCell must not create the cells and rows they skip.
-void sparseSheetTest()
-{
-  TempFile file("sparse");
-  {
-    XLDocument doc;
-    doc.create(file.name(), XLForceOverwrite);
-    auto wks = doc.workbook().worksheet(1);
-    wks.cell("A1").value() = std::string("a");
-    wks.cell("C1").value() = std::string("c");
-    wks.cell("B500").value() = std::string("far");
-    doc.save();
-    doc.close();
-  }
-
-  XLDocument doc;
-  doc.open(file.name());
-  auto wks = doc.workbook().worksheet(1);
-  CHECK_EQ(wks.rowCount(), uint32_t(500));
-  CHECK_EQ(wks.columnCount(), uint16_t(3));
-
-  CHECK_EQ(rowPattern(wks, 1, 1, 3), std::string("1:x.x"));
-  CHECK_EQ(rowPattern(wks, 1, 1, 3), std::string("1:x.x")); // B1 still not created
-  CHECK_EQ(rowPattern(wks, 2, 499, 3), std::string());
-  CHECK_EQ(rowPattern(wks, 500, 500, 3), std::string("500:.x."));
-  CHECK_EQ(rowPattern(wks, 1, 500, 1), std::string("1:x 500:.")); // colCount cuts off
-  CHECK_EQ(rowPattern(wks, 1, 500, 5), std::string("1:x.x.. 500:.x..."));
-
-  size_t rows = 0;
-  for (XMLNode row = sheetDataNode(wks).first_child_of_type(pugi::node_element); !row.empty();
-       row = row.next_sibling_of_type(pugi::node_element))
-    ++rows;
-  CHECK_EQ(rows, size_t(2)); // nothing was created
-  CHECK_EQ(wks.rowCount(), uint32_t(500));
-  SheetExtent extent = sheetExtent(wks);
-  CHECK_EQ(extent.rows, uint32_t(500));
-  CHECK_EQ(extent.columns, uint16_t(3));
-  doc.close();
-}
-
-// The r attributes of rows and cells are optional in the file format: an
-// element without one follows the previous one. Elements that do not ascend
-// are skipped, other children of a row (<extLst>) ignored.
-void implicitReferenceTest()
-{
-  TempFile file("implicit");
-  XLDocument doc;
-  doc.create(file.name(), XLForceOverwrite);
-  auto wks = doc.workbook().worksheet(1);
-  wks.cell("A1").value() = 1;
-  wks.cell("B1").value() = 2;
-  wks.cell("D1").value() = 4;
-  wks.cell("A2").value() = 5;
-  wks.cell("C4").value() = 6;
-  wks.cell("A6").value() = 7;
-  wks.row(6).setHidden(true);
-
-  XMLNode sheetData = sheetDataNode(wks);
-  XMLNode row1 = sheetData.first_child_of_type(pugi::node_element);
-  XMLNode row2 = row1.next_sibling_of_type(pugi::node_element);
-  XMLNode row4 = row2.next_sibling_of_type(pugi::node_element);
-  XMLNode cellB1 = row1.first_child_of_type(pugi::node_element).next_sibling_of_type(pugi::node_element);
-  XMLNode cellD1 = cellB1.next_sibling_of_type(pugi::node_element);
-  cellB1.remove_attribute("r");          // still B1
-  cellD1.remove_attribute("r");          // now C1
-  row1.append_child("extLst");
-  row2.remove_attribute("r");            // still row 2
-  row4.attribute("r").set_value(2);      // does not ascend: skipped
-
-  CHECK_EQ(rowPattern(wks, 1, 10, 4), std::string("1:xxx. 2:x... 6h:x..."));
-  SheetExtent extent = sheetExtent(wks); // D1 is now C1, row 4 is skipped
-  CHECK_EQ(extent.rows, uint32_t(6));
-  CHECK_EQ(extent.columns, uint16_t(3));
-  CHECK_EQ(rowPattern(wks, 2, 5, 4), std::string("2:x..."));
-
-  std::vector<int64_t> values;
-  forEachRow(wks, 1, 1, [&](const SheetRow &row)
-  {
-    forEachCell(row, 4, [&](uint16_t, XLCell *cell)
+    bool row(uint32_t number, bool hidden) override
     {
-      if (cell)
-        values.push_back(cell->value().get<int64_t>());
-    });
-  });
-  CHECK(values == std::vector<int64_t>({1, 2, 4}));
-  doc.close();
-}
+      rowList.emplace_back(number, hidden);
+      return true;
+    }
 
-void cellReferenceTest()
-{
-  char buf[16];
-  CHECK_EQ(std::string(cellReference(1, 1, buf)), std::string("A1"));
-  CHECK_EQ(std::string(cellReference(7, 26, buf)), std::string("Z7"));
-  CHECK_EQ(std::string(cellReference(7, 27, buf)), std::string("AA7"));
-  CHECK_EQ(std::string(cellReference(12, 702, buf)), std::string("ZZ12"));
-  CHECK_EQ(std::string(cellReference(12, 703, buf)), std::string("AAA12"));
-  CHECK_EQ(std::string(cellReference(1048576, 16384, buf)), std::string("XFD1048576"));
-  for (int c : {1, 2, 25, 26, 27, 52, 53, 701, 702, 703, 16384})
+    bool cell(const cxlsx_cell &c) override
+    {
+      if (cells.size() == throwAt)
+        throw std::logic_error("thrown by the visitor");
+      rowBeforeCells = rowBeforeCells && !rowList.empty() && rowList.back().first == c.row;
+      cells.push_back({c.row, c.column, c.type, c.number, c.boolean, cellText(c)});
+      return true;
+    }
+
+    const RecordedCell *at(uint32_t row, uint32_t column) const
+    {
+      for (const RecordedCell &c : cells)
+        if (c.row == row && c.column == column)
+          return &c;
+      return nullptr;
+    }
+  };
+
+  // The cell at (row, column) has this type (and number or text).
+  bool cellIs(const Recorder &rec, uint32_t row, uint32_t column, uint32_t type,
+              double number = 0.0, const std::string &text = std::string())
   {
-    CHECK_EQ(referenceColumn(cellReference(3, static_cast<uint16_t>(c), buf)), static_cast<uint16_t>(c));
-    CHECK_EQ(std::string(cellReference(1048576, static_cast<uint16_t>(c), buf)),
-             XLCellReference(1048576, static_cast<uint16_t>(c)).address());
+    const RecordedCell *c = rec.at(row, column);
+    if (!c || c->type != type)
+      return false;
+    if (type == CXLSX_TEXT || type == CXLSX_ERROR)
+      return c->text == text;
+    if (type == CXLSX_BOOL)
+      return c->boolean == (number != 0.0);
+    return type == CXLSX_UNCACHED_FORMULA || c->number == number;
   }
 }
 
-// SheetWriter must produce the cells OpenXLSX's own cell.value() = ...
-// produces: same type, value, <v> text and format, with shared strings
-// reused across sheets.
-void sheetWriterTest()
-{
-  TempFile file("writer");
-  const double nan = std::numeric_limits<double>::quiet_NaN();
-  const double inf = std::numeric_limits<double>::infinity();
-  {
-    XLDocument doc;
-    doc.create(file.name(), XLForceOverwrite);
-    XLStyleIndex dateTime = createDateTimeFormat(doc);
-    auto api = doc.workbook().worksheet(1);
-    doc.workbook().addWorksheet("Writer");
-    auto written = doc.workbook().worksheet("Writer");
-
-    // Row 1: integers, row 2: floats, row 3: booleans and texts.
-    const int64_t ints[] = {0, -5, 2147483648LL, std::numeric_limits<int64_t>::max()};
-    const double floats[] = {0.1, 123.0, 1e20, -2.5e-300, nan, inf};
-    const char *texts[] = {"a", "", " lead", "a", "Ã¤â¬"};
-
-    for (uint16_t c = 0; c < 4; ++c)
-      api.cell(1, static_cast<uint16_t>(c + 1)).value() = ints[c];
-    for (uint16_t c = 0; c < 6; ++c)
-      api.cell(2, static_cast<uint16_t>(c + 1)).value() = floats[c];
-    api.cell(3, 1).value() = true;
-    api.cell(3, 2).value() = false;
-    for (uint16_t c = 0; c < 5; ++c)
-      api.cell(3, static_cast<uint16_t>(c + 3)).value() = std::string(texts[c]);
-    api.cell(4, 2).value() = XLDateTime(46023.5);
-    api.cell(4, 2).setCellFormat(dateTime);
-
-    SharedStringIndex strings(doc.sharedStrings());
-    SheetWriter out(written, strings);
-    out.beginRow(1);
-    for (uint16_t c = 0; c < 4; ++c)
-      out.integer(static_cast<uint16_t>(c + 1), ints[c]);
-    out.beginRow(2);
-    for (uint16_t c = 0; c < 6; ++c)
-      out.number(static_cast<uint16_t>(c + 1), floats[c]);
-    out.beginRow(3);
-    out.boolean(1, true);
-    out.boolean(2, false);
-    for (uint16_t c = 0; c < 5; ++c)
-      out.text(static_cast<uint16_t>(c + 3), texts[c]);
-    out.beginRow(4);
-    out.number(2, 46023.5, dateTime);
-
-    bool threw = false;
-    try { out.beginRow(4); } catch (const std::invalid_argument &) { threw = true; }
-    CHECK(threw); // rows must ascend
-    threw = false;
-    try { out.number(2, 1.0); } catch (const std::invalid_argument &) { threw = true; }
-    CHECK(threw); // columns must ascend
-    threw = false;
-    try { SheetWriter again(written, strings); again.beginRow(4); } catch (const std::invalid_argument &) { threw = true; }
-    CHECK(threw); // a new writer starts after the existing rows
-
-    // Five texts, four distinct ones, all already written on the API sheet.
-    CHECK_EQ(doc.sharedStrings().stringCount(), int32_t(4));
-
-    // Writers sharing one index see each other's new strings.
-    doc.workbook().addWorksheet("Second");
-    doc.workbook().addWorksheet("Third");
-    auto second = doc.workbook().worksheet("Second");
-    auto third = doc.workbook().worksheet("Third");
-    SheetWriter w2(second, strings);
-    SheetWriter w3(third, strings);
-    w2.beginRow(1);
-    w3.beginRow(1);
-    w2.text(1, "new");
-    w3.text(1, "new");
-    CHECK_EQ(doc.sharedStrings().stringCount(), int32_t(5));
-    CHECK_EQ(strings.indexOf("new"), doc.sharedStrings().getStringIndex("new"));
-    CHECK_EQ(strings.indexOf("a"), doc.sharedStrings().getStringIndex("a"));
-    doc.save();
-    doc.close();
-  }
-
-  XLDocument doc;
-  doc.open(file.name());
-  auto api = doc.workbook().worksheet(1);
-  auto written = doc.workbook().worksheet("Writer");
-  for (const char *ref : {"A1", "B1", "C1", "D1", "A2", "B2", "C2", "D2", "E2", "F2",
-                          "A3", "B3", "C3", "D3", "E3", "F3", "G3", "A4", "B4"})
-  {
-    XLCell expected = api.findCell(ref);
-    XLCell actual = written.findCell(ref);
-    CHECK_EQ(bool(actual), bool(expected));
-    if (!expected || !actual)
-      continue;
-    CHECK(actual.value().type() == expected.value().type());
-    CHECK_EQ(actual.value().getString(), expected.value().getString());
-    CHECK_EQ(rawNumberText(actual), rawNumberText(expected));
-    CHECK_EQ(actual.cellFormat(), expected.cellFormat());
-  }
-  CHECK_EQ(written.findCell("G3").value().get<std::string>(), std::string("Ã¤â¬"));
-  CHECK_EQ(written.findCell("E2").value().getString(), std::string("#NUM!"));
-  CHECK_EQ(written.findCell("D1").value().get<int64_t>(), std::numeric_limits<int64_t>::max());
-  doc.close();
-}
-
-// Cells from testdata/CtrlExcelReaderFixture.xlsx (written like Excel does,
-// see testdata/make_fixture.py), column B.
+// testdata/CtrlExcelReaderFixture.xlsx (written like Excel does, see
+// testdata/make_fixture.py) through the library.
 void fixtureTest()
 {
   if (!std::filesystem::exists(std::filesystem::u8path(fixturePath)))
@@ -725,101 +444,175 @@ void fixtureTest()
     return;
   }
 
-  setTimeZone("UTC0");
-  XLDocument doc;
-  doc.open(fixturePath);
-  auto wks = doc.workbook().worksheet("Fixture");
-  XLStyles styles = doc.styles();
-  std::unordered_map<XLStyleIndex, bool> dateCache;
-  ReadState state;
-  const time_t maxSec = std::numeric_limits<time_t>::max();
+  Workbook book(fixturePath);
+  CHECK(book.sheetNames() == std::vector<std::string>({"Fixture", "Implicit"}));
 
-  // pre1970: 1960-05-01 is a date, outside CTRL time.
-  {
-    XLCell cell = wks.cell("B2");
-    CellNumber num;
-    CHECK(numberAt(wks, "B2", num));
-    CHECK(isDateNumber(num, cell, styles, dateCache));
-    std::tm tm{};
-    int16_t milli = 0;
-    time_t sec = 0;
-    CHECK(serialToLocalTime(num.value, tm, milli, sec, maxSec, state) == LocalTime::OutOfRange);
-    CHECK_EQ(headerText(cell, styles, dateCache, state), std::string("1960-05-01"));
-  }
-  // dateInt: whole-number serial, typed Integer, still a date.
-  {
-    XLCell cell = wks.cell("B3");
-    CellNumber num;
-    CHECK(numberAt(wks, "B3", num));
-    CHECK(num.isInteger);
-    CHECK(isDateNumber(num, cell, styles, dateCache));
-    CHECK_EQ(headerText(cell, styles, dateCache, state), std::string("2026-01-01"));
-  }
-  // duration: [h]:mm is a number.
-  {
-    XLCell cell = wks.cell("B4");
-    CellNumber num;
-    CHECK(numberAt(wks, "B4", num));
-    CHECK(!isDateNumber(num, cell, styles, dateCache));
-    CHECK_EQ(num.value, 1.5);
-  }
-  // error: the code is kept in <v>.
-  {
-    XLCell cell = wks.cell("B5");
-    CHECK(cell.value().type() == XLValueType::Error);
-    CHECK_EQ(rawNumberText(cell), std::string("#DIV/0!"));
-    CHECK(!isUncachedFormula(cell, cell.value()));
-  }
-  // uncached: formula without <v>.
-  {
-    XLCell cell = wks.cell("B6");
-    CHECK(isUncachedFormula(cell, cell.value()));
-    CHECK_EQ(headerText(cell, styles, dateCache, state), std::string());
-  }
-  // crlf / literal: only Excel's own escapes are decoded.
-  CHECK_EQ(decodeExcelEscapes(wks.cell("B7").value().get<std::string>()), std::string("a\r\nb"));
-  CHECK_EQ(decodeExcelEscapes(wks.cell("B8").value().get<std::string>()), std::string("AB_x0041_7"));
-  // exponent: "1E+20" without '.', which OpenXLSX reads as Integer 1.
-  {
-    XLCell cell = wks.cell("B9");
-    CellNumber num;
-    CHECK(numberAt(wks, "B9", num));
-    CHECK(!num.isInteger);
-    CHECK_EQ(num.value, 1e20);
-    CHECK_EQ(headerText(cell, styles, dateCache, state), std::string("1e+20"));
-  }
-  // bigint: beyond int64, which OpenXLSX clamps.
-  {
-    CellNumber num;
-    CHECK(numberAt(wks, "B10", num));
-    CHECK(!num.isInteger);
-    CHECK_EQ(num.value, 12345678901234567890.0);
-  }
-  // Row 11 only carries formatting; it exists but has no cells.
-  {
-    CHECK_EQ(rowPattern(wks, 11, 11, 2), std::string("11:.."));
-  }
+  Recorder rec;
+  book.readSheet("Fixture", rec);
+  CHECK_EQ(rec.rows, uint32_t(12));
+  CHECK_EQ(rec.columns, uint32_t(2));
+  CHECK_EQ(rec.rowList.size(), size_t(12)); // row 11 only carries formatting
+  CHECK(rec.rowBeforeCells);
+  CHECK(cellIs(rec, 2, 2, CXLSX_DATETIME, 22037.0));  // pre1970
+  CHECK(cellIs(rec, 3, 2, CXLSX_DATETIME, 46023.0));  // dateInt: whole serial, still a date
+  CHECK(cellIs(rec, 4, 2, CXLSX_DURATION, 1.5));      // [h]:mm
+  CHECK(cellIs(rec, 5, 2, CXLSX_ERROR, 0, "#DIV/0!"));
+  CHECK(cellIs(rec, 6, 2, CXLSX_UNCACHED_FORMULA));
+  CHECK(cellIs(rec, 7, 2, CXLSX_TEXT, 0, "a\r\nb"));  // _x000D_
+  CHECK(cellIs(rec, 8, 2, CXLSX_TEXT, 0, "ABA7"));    // every escape is decoded
+  CHECK(cellIs(rec, 9, 2, CXLSX_NUMBER, 1e20));       // "1E+20"
+  CHECK(cellIs(rec, 10, 2, CXLSX_NUMBER, 12345678901234567890.0));
+  CHECK(rec.at(11, 1) == nullptr);
+  CHECK(cellIs(rec, 12, 2, CXLSX_TEXT, 0, "last"));
+
   // Sheet "Implicit": row 3 missing, rows 5 and 6 and some cells without r,
-  // row 5 ends in <extLst> (which made OpenXLSX's noexcept columnCount() throw).
-  {
-    auto implicit = doc.workbook().worksheet("Implicit");
-    SheetExtent extent = sheetExtent(implicit);
-    CHECK_EQ(extent.rows, uint32_t(6));
-    CHECK_EQ(extent.columns, uint16_t(2));
-    CHECK_EQ(rowPattern(implicit, 1, 6, 2), std::string("1:xx 2:xx 4:xx 5:xx 6:xx"));
+  // row 5 ends in <extLst>.
+  Recorder implicit;
+  book.readSheet("Implicit", implicit);
+  CHECK_EQ(implicit.rows, uint32_t(6));
+  CHECK_EQ(implicit.columns, uint32_t(2));
+  std::vector<uint32_t> rowNumbers;
+  for (const auto &r : implicit.rowList)
+    rowNumbers.push_back(r.first);
+  CHECK(rowNumbers == std::vector<uint32_t>({1, 2, 4, 5, 6}));
+  CHECK(cellIs(implicit, 5, 1, CXLSX_TEXT, 0, "implicitRow"));
+  CHECK(cellIs(implicit, 5, 2, CXLSX_NUMBER, 3.0));
+  CHECK(cellIs(implicit, 6, 2, CXLSX_NUMBER, 4.0));
+}
 
-    std::vector<int64_t> values;
-    forEachRow(implicit, 2, 6, [&](const SheetRow &row)
-    {
-      forEachCell(row, 2, [&](uint16_t c, XLCell *cell)
-      {
-        if (c == 1 && cell)
-          values.push_back(cell->value().get<int64_t>());
-      });
-    });
-    CHECK(values == std::vector<int64_t>({1, 2, 3, 4}));
+// WorkbookWriter, read back through Workbook.
+void writeReadTest()
+{
+  TempFile file("write_read");
+  {
+    WorkbookWriter out;
+    out.addSheet("Data");
+    out.text(1, 1, "Name", CellStyle::Header);
+    out.text(1, 2, "", CellStyle::Header); // empty header: a styled blank cell
+    out.text(2, 1, "a\rb\x01_x0041_\xEF\xBF\xBE");
+    out.number(2, 2, 46023.5, CellStyle::DateTime);
+    out.boolean(2, 3, true);
+    out.number(3, 1, 5000000000.0);
+    out.number(3, 2, std::numeric_limits<double>::infinity());
+    out.number(3, 3, -3e-7);
+    out.text(3, 4, ""); // not stored
+    out.columnWidth(1, 1000.0); // capped
+    out.addSheet(u8"Äpfel");
+    out.number(1, 1, 1.0);
+    out.save(file.name());
   }
-  doc.close();
+
+  Workbook book(file.name());
+  CHECK(book.sheetNames() == std::vector<std::string>({"Data", u8"Äpfel"}));
+  Recorder rec;
+  book.readSheet("Data", rec);
+  CHECK_EQ(rec.rows, uint32_t(3));
+  CHECK_EQ(rec.columns, uint32_t(3)); // the blank header cell counts, D3 was not written
+  CHECK(cellIs(rec, 1, 1, CXLSX_TEXT, 0, "Name"));
+  CHECK(rec.at(1, 2) == nullptr);
+  CHECK(cellIs(rec, 2, 1, CXLSX_TEXT, 0, "a\rb\x01_x0041_\xEF\xBF\xBE"));
+  CHECK(cellIs(rec, 2, 2, CXLSX_DATETIME, 46023.5));
+  CHECK(cellIs(rec, 2, 3, CXLSX_BOOL, 1.0));
+  CHECK(cellIs(rec, 3, 1, CXLSX_NUMBER, 5000000000.0));
+  CHECK(cellIs(rec, 3, 2, CXLSX_ERROR, 0, "#NUM!"));
+  CHECK(cellIs(rec, 3, 3, CXLSX_NUMBER, -3e-7));
+
+  Recorder second;
+  book.readSheet(u8"Äpfel", second);
+  CHECK(cellIs(second, 1, 1, CXLSX_NUMBER, 1.0));
+
+  // A workbook without sheets gets "Sheet1"; save replaces the file.
+  {
+    WorkbookWriter empty;
+    empty.save(file.name());
+  }
+  CHECK(Workbook(file.name()).sheetNames() == std::vector<std::string>({"Sheet1"}));
+}
+
+// Errors of the library and of visitors arrive as exceptions.
+void errorTest()
+{
+  bool thrown = false;
+  try
+  {
+    Workbook missing("does/not/exist.xlsx");
+  }
+  catch (const std::runtime_error &e)
+  {
+    thrown = std::string(e.what()).size() > 0;
+  }
+  CHECK(thrown);
+
+  Workbook book(fixturePath);
+  Recorder rec;
+  thrown = false;
+  try
+  {
+    book.readSheet("No such sheet", rec);
+  }
+  catch (const std::runtime_error &e)
+  {
+    thrown = std::string(e.what()).find("No such sheet") != std::string::npos;
+  }
+  CHECK(thrown);
+
+  // An exception of the visitor ends the read and is rethrown as it is.
+  Recorder throwing;
+  throwing.throwAt = 2;
+  thrown = false;
+  try
+  {
+    book.readSheet("Fixture", throwing);
+  }
+  catch (const std::logic_error &)
+  {
+    thrown = true;
+  }
+  CHECK(thrown);
+  CHECK_EQ(throwing.cells.size(), size_t(2));
+  // The book stays usable.
+  Recorder after;
+  book.readSheet("Implicit", after);
+  CHECK_EQ(after.rowList.size(), size_t(5));
+
+  WorkbookWriter out;
+  thrown = false;
+  try
+  {
+    out.text(1, 1, "no sheet added yet");
+  }
+  catch (const std::runtime_error &)
+  {
+    thrown = true;
+  }
+  CHECK(thrown);
+  out.addSheet("S");
+  thrown = false;
+  try
+  {
+    out.text(1, 1, std::string(32768, 'a')); // over Excel's cell limit
+  }
+  catch (const std::runtime_error &)
+  {
+    thrown = true;
+  }
+  CHECK(thrown);
+
+  // A directory of the target name cannot be replaced: save fails and
+  // leaves it alone.
+  TempFile dir("directory");
+  std::filesystem::create_directory(dir.path);
+  thrown = false;
+  try
+  {
+    out.save(dir.name());
+  }
+  catch (const std::runtime_error &)
+  {
+    thrown = true;
+  }
+  CHECK(thrown);
+  CHECK(std::filesystem::is_directory(dir.path));
 }
 
 //------------------------------------------------------------------------------
@@ -834,24 +627,19 @@ int main(int argc, char *argv[])
   const std::pair<const char *, void (*)()> tests[] = {
     {"calendarTest", calendarTest},
     {"utf16LengthTest", utf16LengthTest},
-    {"toXmlUtf8Test", toXmlUtf8Test},
-    {"decodeExcelEscapesTest", decodeExcelEscapesTest},
+    {"toValidUtf8Test", toValidUtf8Test},
     {"foldCaseTest", foldCaseTest},
     {"checkSheetNamesTest", checkSheetNamesTest},
     {"numberWidthTest", numberWidthTest},
-    {"dateFormatTest", dateFormatTest},
+    {"integerFitTest", integerFitTest},
     {"utcTimeTest", utcTimeTest},
 #ifndef _WIN32
     {"dstTimeTest", dstTimeTest},
 #endif
-    {"numberRoundTripTest", numberRoundTripTest},
     {"headerTextTest", headerTextTest},
-    {"referenceColumnTest", referenceColumnTest},
-    {"sparseSheetTest", sparseSheetTest},
-    {"implicitReferenceTest", implicitReferenceTest},
-    {"cellReferenceTest", cellReferenceTest},
-    {"sheetWriterTest", sheetWriterTest},
     {"fixtureTest", fixtureTest},
+    {"writeReadTest", writeReadTest},
+    {"errorTest", errorTest},
   };
 
   const int numTests = static_cast<int>(sizeof(tests) / sizeof(tests[0]));

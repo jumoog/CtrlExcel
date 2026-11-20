@@ -1,8 +1,9 @@
 name: CI
 
-# Builds and runs the C++ tests (tests/). The CTRL extension itself needs the
-# proprietary WinCC OA API, which is not available here, so it is not built;
-# ExcelRoundTripTest.ctl still has to be run in a WinCC OA project.
+# Builds and runs the Rust tests (rust/) and the C++ tests (tests/). The CTRL
+# extension itself needs the proprietary WinCC OA API, which is not available
+# here, so it is not built; ExcelRoundTripTest.ctl still has to be run in a
+# WinCC OA project (or with docker/).
 
 on:
   push:
@@ -20,34 +21,52 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            triplet: x64-linux
-          - os: windows-latest
-            triplet: x64-windows-static-md
+        os: [ubuntu-latest, windows-latest]
+
+    env:
+      CARGO_TERM_COLOR: always
+      # Warnings fail the build, as -DCMAKE_COMPILE_WARNING_AS_ERROR does for C++
+      RUSTFLAGS: -D warnings
 
     steps:
       - uses: actions/checkout@v7
 
-      # The runner images ship vcpkg; its built packages are cached per
-      # vcpkg commit, so a runner image update rebuilds them once. No
-      # restore-keys: restoring an older cache would carry its stale archives
-      # into every new cache entry, which then only grows.
-      - name: Set up vcpkg
-        shell: bash
+      # rustup on the runner images; without arguments it installs the
+      # toolchain (and components) pinned in rust/rust-toolchain.toml.
+      - name: Rust toolchain
+        working-directory: rust
         run: |
-          # Forward slashes (Windows paths end up in CMake arguments)
-          root="$(printf '%s' "$VCPKG_INSTALLATION_ROOT" | tr '\\' '/')"
-          echo "VCPKG_ROOT=$root" >> "$GITHUB_ENV"
-          echo "VCPKG_COMMIT=$(git -C "$root" rev-parse HEAD)" >> "$GITHUB_ENV"
-          cache="$(printf '%s' "$RUNNER_TEMP" | tr '\\' '/')/vcpkg-cache"
-          mkdir -p "$cache"
-          echo "VCPKG_DEFAULT_BINARY_CACHE=$cache" >> "$GITHUB_ENV"
+          rustup toolchain install
+          cargo --version
 
       - uses: actions/cache@v6
         with:
-          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-          key: vcpkg-${{ matrix.triplet }}-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}
+
+      - name: Rust format and lints
+        if: runner.os == 'Linux'
+        working-directory: rust
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked
+
+      # A warning, not a failure, so dependency updates (Dependabot) still
+      # pass; regenerate the file before merging.
+      - name: Third-party licenses up to date
+        if: runner.os == 'Linux'
+        run: |
+          python3 rust/third_party_licenses.py
+          if ! git diff --quiet -- THIRD-PARTY-LICENSES.txt; then
+            echo "::warning file=THIRD-PARTY-LICENSES.txt::out of date with rust/Cargo.lock; run python rust/third_party_licenses.py"
+          fi
+
+      - name: Rust tests
+        working-directory: rust
+        run: cargo test --locked
 
       - name: Configure
         shell: bash
@@ -56,11 +75,9 @@ jobs:
           -DCTRLEXCEL_BUILD_EXTENSION=OFF
           -DCMAKE_BUILD_TYPE=RelWithDebInfo
           -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
-          -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
-          -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
 
       - name: Build
         run: cmake --build build --config RelWithDebInfo --parallel
 
-      - name: Test
+      - name: C++ tests
         run: ctest --test-dir build -C RelWithDebInfo --output-on-failure

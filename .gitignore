@@ -41,6 +41,6 @@
 *.dwo
 
 build
-vcpkg_installed
+/rust/target
 /build-linux-relwithdebinfo
 /build-tests

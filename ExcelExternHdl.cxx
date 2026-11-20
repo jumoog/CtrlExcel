@@ -32,8 +32,6 @@
 #include <utility>
 #include <vector>
 
-using namespace OpenXLSX;
-
 static FunctionListRec fnList[] =
 {
   { DYNTEXT_VAR,       "excelGetSheetNames",      "(string filename)",                                                                          false },
@@ -55,7 +53,7 @@ CTRL_EXTENSION(ExcelExternHdl, fnList)
 namespace
 {
   // Append an error the CTRL script can retrieve with getLastError(). msg is
-  // UTF-8 (like everything from OpenXLSX) and converted to the project
+  // UTF-8 (like everything from the xlsx library) and converted to the project
   // encoding here, so callers must not mix in project-encoded text.
   // CTRL thread only.
   void reportError(CtrlThread *thread, const char *funcName,
@@ -122,7 +120,7 @@ namespace
     return !expr || evalArg(expr, thread, out);
   }
 
-  // Filename or sheet name from CTRL, converted for OpenXLSX (UTF-8).
+  // Filename or sheet name from CTRL, converted for the xlsx library (UTF-8).
   std::string utf8Arg(const TextVar &var)
   {
     return ExcelXlsxHelpers::toUtf8(var.getValue());
@@ -274,12 +272,10 @@ namespace
     names.reset(TEXT_VAR);
     try
     {
-      XLDocument doc;
-      doc.open(filename);
+      ExcelXlsxCore::Workbook book(filename);
       // Worksheets only: chartsheets cannot be read by excelReadSheet.
-      for ( const auto &name : doc.workbook().worksheetNames() )
+      for ( const auto &name : book.sheetNames() )
         names.append(TextVar(name.c_str()));
-      doc.close();
     }
     catch (...)
     {
@@ -296,25 +292,21 @@ namespace
     const std::string requestedName = sheetName;
     try
     {
-      XLDocument doc;
-      doc.open(filename);
+      ExcelXlsxCore::Workbook book(filename);
 
-      // An empty name means the first worksheet; worksheet(1) would be the
-      // first sheet of any kind and fail for a chart sheet.
+      // An empty name means the first worksheet (chart sheets do not count).
       if ( sheetName.empty() )
       {
-        auto names = doc.workbook().worksheetNames();
+        auto names = book.sheetNames();
         if ( names.empty() )
           throw std::runtime_error("workbook has no worksheets");
         sheetName = names.front();
       }
-      auto wks = doc.workbook().worksheet(sheetName);
 
       std::vector<std::string> warnings;
-      ExcelXlsxHelpers::readSheetRows(wks, doc, rows, opts.useHeaders, opts.skipHidden,
+      ExcelXlsxHelpers::readSheetRows(book, sheetName, rows, opts.useHeaders, opts.skipHidden,
                                       opts.skipEmpty, warnings);
       addWarnings(msgs, filename + " [" + sheetName + "]", warnings);
-      doc.close();
     }
     catch (...)
     {
@@ -331,20 +323,17 @@ namespace
     sheets.clear();
     try
     {
-      XLDocument doc;
-      doc.open(filename);
+      ExcelXlsxCore::Workbook book(filename);
 
-      for ( const auto &sn : doc.workbook().worksheetNames() )
+      for ( const auto &sn : book.sheetNames() )
       {
         // A broken sheet must not discard the sheets read so far or after it.
         try
         {
-          auto wks = doc.workbook().worksheet(sn);
-
           std::unique_ptr<DynVar> rows(new DynVar);
           rows->reset(MAPPING_VAR);
           std::vector<std::string> warnings;
-          ExcelXlsxHelpers::readSheetRows(wks, doc, *rows, opts.useHeaders, opts.skipHidden,
+          ExcelXlsxHelpers::readSheetRows(book, sn, *rows, opts.useHeaders, opts.skipHidden,
                                           opts.skipEmpty, warnings);
           addWarnings(msgs, filename + " [" + sn + "]", warnings);
           sheets.emplace_back(sn, std::move(rows));
@@ -354,8 +343,6 @@ namespace
           msgs.addCurrentException(filename + " [" + sn + "]");
         }
       }
-
-      doc.close();
     }
     catch (...)
     {
@@ -372,9 +359,9 @@ namespace
   // file untouched.
   bool writeWorkbook(const std::string &filename, const SheetList &sheets, Messages &msgs)
   {
-    // OpenXLSX only rejects exact duplicates; names Excel refuses would give
-    // a file Excel reports as corrupt.
-    // checkSheetNames also converts the names to valid UTF-8; use its result.
+    // Excel's own rules (case-insensitive duplicates, "History"), checked
+    // before anything is written. checkSheetNames also converts the names to
+    // valid UTF-8; use its result.
     std::vector<std::string> names;
     names.reserve(sheets.size());
     for ( const auto &sheet : sheets )
@@ -408,34 +395,21 @@ namespace
         return false;
       }
 
-      // create() works on a temporary archive; filename is only written by save().
-      XLDocument doc;
-      doc.create(filename, XLForceOverwrite);
-      doc.setProperty(XLProperty::Creator, "WinCC OA");
-      doc.setProperty(XLProperty::LastModifiedBy, "WinCC OA");
-
-      auto wb = doc.workbook();
-      // One index of the shared strings for all sheets (see SheetWriter).
-      ExcelXlsxCore::SharedStringIndex strings(doc.sharedStrings());
+      // filename is only written by save(), through a temporary file.
+      ExcelXlsxCore::WorkbookWriter out;
       for ( size_t s = 0; s < sheets.size(); s++ )
       {
         const std::string &sheetName = names[s];
-        if ( s == 0 )
-          wb.worksheet(1).setName(sheetName);
-        else
-          wb.addWorksheet(sheetName);
-
-        auto wks = wb.worksheet(sheetName);
+        out.addSheet(sheetName);
         std::string error;
-        if ( !ExcelXlsxHelpers::writeSheetData(wks, *sheetRows[s], doc, strings, error) )
+        if ( !ExcelXlsxHelpers::writeSheetData(out, *sheetRows[s], error) )
         {
           msgs.add(sheetName + ": " + error);
           return false;
         }
       }
 
-      doc.save();
-      doc.close();
+      out.save(filename);
       return true;
     }
     catch (...)

@@ -1,8 +1,9 @@
 #!/bin/bash
-# Builds CtrlExcelReader against the WinCC OA API and runs both test suites:
-# the C++ tests (ctest) and ExcelRoundTripTest.ctl in a minimal WinCC OA
-# project, with a CTRL manager that does not connect to Data/Event (-n), so
-# no database or PMON is needed. See README.md, "Build and test on Linux in Docker".
+# Builds CtrlExcelReader against the WinCC OA API and runs all test suites:
+# the Rust tests (cargo test), the C++ tests (ctest) and the CTRL tests in a
+# minimal WinCC OA project, with a CTRL manager that does not connect to
+# Data/Event (-n), so no database or PMON is needed. See README.md, "Build
+# and test on Linux in Docker".
 #
 # Expects the sources at /src (read-only is fine) and writes to /build.
 # Exit code 0 only if everything built and every test passed.
@@ -13,11 +14,22 @@ BUILD=${BUILD:-/build}
 OAINST=${OAINST:-/opt/WinCC_OA/3.21}
 CTRL_TIMEOUT=${CTRL_TIMEOUT:-600}
 
+if [ "${WARNINGS_AS_ERRORS:-ON}" = ON ]; then
+  export RUSTFLAGS="${RUSTFLAGS:-} -D warnings"
+fi
+
+echo "=== Rust toolchain"
+# The one pinned in rust/rust-toolchain.toml; kept in ~/.rustup (a volume).
+(cd "$SRC/rust" && rustup toolchain install && cargo --version)
+
+echo "=== Rust tests"
+# /src is read-only: cargo writes its target directory to /build.
+(cd "$SRC/rust" && CARGO_TARGET_DIR="$BUILD/cargo-test" cargo test --locked)
+
 echo "=== Configure"
-cmake -S "$SRC" -B "$BUILD/cmake" -G Ninja \
+# --fresh: a cache from an older build setup must not carry over.
+cmake --fresh -S "$SRC" -B "$BUILD/cmake" -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
-  -DVCPKG_TARGET_TRIPLET=x64-linux \
   -DCMAKE_COMPILE_WARNING_AS_ERROR="${WARNINGS_AS_ERRORS:-ON}"
 
 echo "=== Build"

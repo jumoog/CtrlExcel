@@ -15,32 +15,16 @@ if ( CTRLEXCEL_BUILD_EXTENSION )
 else()
   set(CMAKE_CXX_STANDARD 17)
   set(CMAKE_CXX_STANDARD_REQUIRED ON)
+  # The release C runtime in every configuration, as WinCC OA's
+  # CMakeDefines.txt sets it: the Rust library links it, too.
+  set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreadedDLL)
 endif()
 
-# The version is kept in vcpkg.json only: its top-level "version". CMake
-# before 3.19 has no string(JSON) and falls back to the first "version" key.
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg.json" CTRLEXCEL_MANIFEST)
-if ( CMAKE_VERSION VERSION_GREATER_EQUAL 3.19 )
-  string(JSON CTRLEXCEL_VERSION ERROR_VARIABLE CTRLEXCEL_VERSION_ERROR GET "${CTRLEXCEL_MANIFEST}" version)
-else()
-  string(REGEX MATCH "\"version\"[ \t\r\n]*:[ \t\r\n]*\"([^\"]*)\"" CTRLEXCEL_VERSION_MATCH "${CTRLEXCEL_MANIFEST}")
-  set(CTRLEXCEL_VERSION "${CMAKE_MATCH_1}")
-endif()
-if ( NOT CTRLEXCEL_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$" )
-  message(FATAL_ERROR "vcpkg.json: \"version\" must be \"major.minor.patch\", got \"${CTRLEXCEL_VERSION}\"")
-endif()
+# The version of the extension (the version resource takes it from here).
+project(CtrlExcelReader VERSION 1.0.0)
 
-project(CtrlExcelReader VERSION ${CTRLEXCEL_VERSION})
-
-# --- OpenXLSX (Excel reader / writer) ----------------------------------------
-# OpenXLSXConfig.cmake does not call find_dependency for its link deps
-find_package(pugixml CONFIG REQUIRED)
-find_package(miniz CONFIG REQUIRED)
-if ( WIN32 )
-  # The vcpkg port uses Boost.Nowide on Windows only
-  find_package(Boost CONFIG REQUIRED COMPONENTS nowide)
-endif()
-find_package(OpenXLSX CONFIG REQUIRED)
+# --- xlsx library: calamine (read) and rust_xlsxwriter (write), in rust/ ------
+include(${PROJECT_SOURCE_DIR}/cmake/RustLibrary.cmake)
 
 if ( CTRLEXCEL_BUILD_EXTENSION )
   # Worker threads of the *Async functions (std::thread needs -pthread on Linux)
@@ -72,7 +56,8 @@ if ( CTRLEXCEL_BUILD_EXTENSION )
               -DGIT_EXECUTABLE=${GIT_EXECUTABLE}
               -DVERSION=${PROJECT_VERSION}
               -DWCCOA_VERSION=${WCCOA_VERSION_DISP}
-              -DOPENXLSX_VERSION=${OpenXLSX_VERSION}
+              -DCALAMINE_VERSION=${CTRLEXCEL_calamine_VERSION}
+              -DXLSXWRITER_VERSION=${CTRLEXCEL_rust_xlsxwriter_VERSION}
               -P ${PROJECT_SOURCE_DIR}/cmake/VersionInfo.cmake
       BYPRODUCTS ${CTRLEXCEL_VERSION_HEADER}
       COMMENT "Version information for VersInfo.rc"
@@ -81,14 +66,14 @@ if ( CTRLEXCEL_BUILD_EXTENSION )
     target_include_directories(${TARGET} PRIVATE ${PROJECT_BINARY_DIR})
   endif()
 
-  # pugixml directly too: ExcelXlsxCore walks the sheet XML (forEachRow)
-  target_link_libraries(${TARGET} OpenXLSX::OpenXLSX pugixml::pugixml Threads::Threads)
+  target_link_libraries(${TARGET} Threads::Threads)
+  ctrlexcel_link_xlsx(${TARGET})
 
   if ( NOT WIN32 )
     # Export only newExternHdl and getVersionString. The CTRL manager loads
     # extensions into one global symbol namespace, where any other exported
-    # symbol (our classes, or the statically linked OpenXLSX, pugixml and
-    # miniz) can bind to, or be replaced by, a same-named one of WinCC OA.
+    # symbol (our classes, or the statically linked Rust library) can bind
+    # to, or be replaced by, a same-named one of WinCC OA.
     set_target_properties(${TARGET} PROPERTIES CXX_VISIBILITY_PRESET hidden)
     target_link_options(${TARGET} PRIVATE "LINKER:--exclude-libs,ALL")
   endif()

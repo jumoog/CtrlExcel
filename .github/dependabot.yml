@@ -1,0 +1,38 @@
+# Weekly version updates. CI (.github/workflows/ci.yml) runs the Rust and C++
+# tests on every pull request; the CTRL tests still need a WinCC OA project or
+# docker/. After a cargo update, regenerate THIRD-PARTY-LICENSES.txt
+# (python rust/third_party_licenses.py); CI warns while it is out of date.
+version: 2
+updates:
+  # Crates in rust/Cargo.lock (calamine, rust_xlsxwriter and their
+  # dependencies), in one pull request.
+  - package-ecosystem: cargo
+    directory: /rust
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      rust-crates:
+        patterns: ["*"]
+
+  # The toolchain pinned in rust/rust-toolchain.toml (also used by docker/).
+  - package-ecosystem: rust-toolchain
+    directory: /rust
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
+      include: scope
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      github-actions:
+        patterns: ["*"]

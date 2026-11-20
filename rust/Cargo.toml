@@ -1,0 +1,25 @@
+[package]
+name = "ctrlexcel-xlsx"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "xlsx reading (calamine) and writing (rust_xlsxwriter) for CtrlExcelReader, behind a C ABI"
+license = "MIT"
+
+[lib]
+name = "ctrlexcel_xlsx"
+# staticlib for the CTRL extension, rlib for the tests in tests/
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+calamine = "0.38"
+quick-xml = "0.42"
+# low-memory worksheets (rows go to a temporary file as they are written)
+rust_xlsxwriter = { version = "0.103", features = ["constant_memory"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
+
+[profile.release]
+# Symbols for crash dumps of the CTRL manager, as RelWithDebInfo has
+debug = "line-tables-only"
+# Panics are caught at the C ABI (catch_unwind) and reported as errors
+panic = "unwind"

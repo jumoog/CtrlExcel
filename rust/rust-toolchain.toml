@@ -1,0 +1,6 @@
+# The Rust toolchain the extension is built and tested with (locally, in CI
+# and in docker/). rustup installs it on first use.
+[toolchain]
+channel = "1.100.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

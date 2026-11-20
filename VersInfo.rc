@@ -1,7 +1,7 @@
 // Version resource of CtrlExcelReader.dll (Properties > Details in Explorer,
 // or (Get-Item CtrlExcelReader.dll).VersionInfo in PowerShell).
 // CtrlExcelVersion.h is generated on every build by cmake/VersionInfo.cmake:
-// the version comes from vcpkg.json, the revision from git, so the
+// the version comes from CMakeLists.txt, the revision from git, so the
 // ProductVersion (e.g. "1.0.0+a5f43da") names the commit a DLL was built from.
 
 #include <windows.h>

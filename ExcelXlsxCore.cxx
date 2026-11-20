@@ -1,40 +1,17 @@
 #include <ExcelXlsxCore.hxx>
 
-#include <cctype>
-#include <cerrno>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <limits>
-#include <sstream>
+#include <new>
 #include <stdexcept>
 #include <unordered_set>
-
-using namespace OpenXLSX;
 
 namespace
 {
   constexpr size_t EXCEL_MAX_SHEET_NAME_CHARS = 31;
-
-  bool isHex(unsigned char c)
-  {
-    return isxdigit(c) != 0;
-  }
-
-  // Whether p starts an Excel escape sequence "_xHHHH_".
-  bool isExcelEscape(const unsigned char *p)
-  {
-    return p[0] == '_' && (p[1] == 'x' || p[1] == 'X')
-        && isHex(p[2]) && isHex(p[3]) && isHex(p[4]) && isHex(p[5]) && p[6] == '_';
-  }
-
-  void appendExcelEscape(std::string &out, unsigned int codeUnit)
-  {
-    char buf[8];
-    snprintf(buf, sizeof(buf), "_x%04X_", codeUnit);
-    out += buf;
-  }
 
   bool toLocalCalendarTime(time_t sec, std::tm &outTm)
   {
@@ -58,170 +35,10 @@ namespace
       return ExcelXlsxCore::ReadState::OFFSET_VARIES;
     return unixDay * ExcelXlsxCore::DAY_SECONDS + secOfDay - static_cast<long long>(t);
   }
-
-  // XLXmlFile::xmlDocument() and parentDoc() are protected, and OpenXLSX
-  // offers no public way to walk a sheet's rows and cells without its
-  // per-lookup row search. A derived class may form pointers to protected
-  // members (named through itself) and apply them to any XLXmlFile.
-  struct XmlFileAccess : XLXmlFile
-  {
-    static XMLDocument &document(XLXmlFile &file)
-    {
-      XMLDocument &(XLXmlFile::*get)() = &XmlFileAccess::xmlDocument;
-      return (file.*get)();
-    }
-
-    static const XLDocument &parent(const XLXmlFile &file)
-    {
-      const XLDocument &(XLXmlFile::*get)() const = &XmlFileAccess::parentDoc;
-      return (file.*get)();
-    }
-  };
 }
 
 namespace ExcelXlsxCore
 {
-  uint16_t referenceColumn(const char *ref)
-  {
-    unsigned column = 0;
-    for (const char *p = ref; p && *p >= 'A' && *p <= 'Z'; ++p)
-    {
-      column = column * 26 + static_cast<unsigned>(*p - 'A' + 1);
-      if (column > MAX_COLS)
-        return 0;
-    }
-    return static_cast<uint16_t>(column);
-  }
-
-  XMLNode sheetDataNode(XLWorksheet &wks)
-  {
-    return XmlFileAccess::document(wks).document_element().child("sheetData");
-  }
-
-  const XLSharedStrings &sheetSharedStrings(XLWorksheet &wks)
-  {
-    return XmlFileAccess::parent(wks).sharedStrings();
-  }
-
-  SheetExtent sheetExtent(XLWorksheet &wks)
-  {
-    SheetExtent extent;
-    forEachRow(wks, 1, MAX_ROWS, [&](const SheetRow &row)
-    {
-      extent.rows = row.number;
-      forEachCellNode(row, [&](uint16_t column, const XMLNode &)
-      {
-        if (column > extent.columns)
-          extent.columns = column;
-        return true;
-      });
-    });
-    return extent;
-  }
-
-  const char *cellReference(uint32_t row, uint16_t column, char (&buf)[16])
-  {
-    char letters[4];
-    int n = 0;
-    for (unsigned c = column; c > 0 && n < 3; c = (c - 1) / 26)
-      letters[n++] = static_cast<char>('A' + (c - 1) % 26);
-    int pos = 0;
-    while (n > 0)
-      buf[pos++] = letters[--n];
-    snprintf(buf + pos, sizeof(buf) - static_cast<size_t>(pos), "%u", static_cast<unsigned>(row));
-    return buf;
-  }
-
-  SharedStringIndex::SharedStringIndex(const XLSharedStrings &strings)
-    : m_strings(strings)
-  {
-    // emplace keeps the first index of a duplicate, as getStringIndex does.
-    const int32_t count = m_strings.stringCount();
-    m_index.reserve(static_cast<size_t>(count));
-    for (int32_t i = 0; i < count; ++i)
-      m_index.emplace(m_strings.getString(i), i);
-  }
-
-  int32_t SharedStringIndex::indexOf(const std::string &text)
-  {
-    auto known = m_index.find(text);
-    if (known != m_index.end())
-      return known->second;
-    const int32_t index = m_strings.appendString(text);
-    m_index.emplace(text, index);
-    return index;
-  }
-
-  SheetWriter::SheetWriter(XLWorksheet &wks, SharedStringIndex &strings)
-    : m_sheetData(sheetDataNode(wks)),
-      m_rowNumber(sheetExtent(wks).rows),
-      m_strings(strings)
-  {
-  }
-
-  void SheetWriter::beginRow(uint32_t row)
-  {
-    if (row == 0 || row > MAX_ROWS || row <= m_rowNumber)
-      throw std::invalid_argument("SheetWriter: row " + std::to_string(row) + " does not follow row "
-                                  + std::to_string(m_rowNumber));
-    m_row = m_sheetData.append_child("row");
-    m_row.append_attribute("r").set_value(row);
-    m_rowNumber = row;
-    m_column = 0;
-  }
-
-  XMLNode SheetWriter::appendCell(uint16_t column, XLStyleIndex style)
-  {
-    if (m_row.empty())
-      throw std::invalid_argument("SheetWriter: no row begun");
-    if (column == 0 || column > MAX_COLS || column <= m_column)
-      throw std::invalid_argument("SheetWriter: column " + std::to_string(column) + " does not follow column "
-                                  + std::to_string(m_column));
-    m_column = column;
-
-    char ref[16];
-    XMLNode cell = m_row.append_child("c");
-    cell.append_attribute("r").set_value(cellReference(m_rowNumber, column, ref));
-    if (style != XLDefaultCellFormat)
-      cell.append_attribute("s").set_value(style);
-    return cell;
-  }
-
-  // The values are set with the same pugixml calls as OpenXLSX's
-  // XLCellValueProxy::setInteger / setFloat / setBoolean / setString /
-  // setError, so the text in the file (e.g. %.17g for doubles) is identical.
-  void SheetWriter::integer(uint16_t column, int64_t value, XLStyleIndex style)
-  {
-    appendCell(column, style).append_child("v").text().set(value);
-  }
-
-  void SheetWriter::number(uint16_t column, double value, XLStyleIndex style)
-  {
-    XMLNode cell = appendCell(column, style);
-    if (std::isfinite(value))
-    {
-      cell.append_child("v").text().set(value);
-      return;
-    }
-    cell.append_attribute("t").set_value("e");
-    cell.append_child("v").text().set("#NUM!");
-  }
-
-  void SheetWriter::boolean(uint16_t column, bool value, XLStyleIndex style)
-  {
-    XMLNode cell = appendCell(column, style);
-    cell.append_attribute("t").set_value("b");
-    cell.append_child("v").text().set(value ? 1 : 0);
-  }
-
-  void SheetWriter::text(uint16_t column, const std::string &utf8, XLStyleIndex style)
-  {
-    XMLNode cell = appendCell(column, style);
-    const int32_t index = m_strings.indexOf(utf8);
-    cell.append_attribute("t").set_value("s");
-    cell.append_child("v").text().set(index);
-  }
-
   long long daysFromCivil(long long y, unsigned m, unsigned d)
   {
     y -= m <= 2;
@@ -268,7 +85,7 @@ namespace ExcelXlsxCore
     return n;
   }
 
-  std::string toXmlUtf8(const char *text, bool cellText)
+  std::string toValidUtf8(const char *text)
   {
     std::string out;
     const unsigned char *p = reinterpret_cast<const unsigned char *>(text);
@@ -300,63 +117,8 @@ namespace ExcelXlsxCore
         continue;
       }
 
-      if (cellText)
-      {
-        if (len == 1 && c < 0x20 && c != '\t' && c != '\n')
-        {
-          appendExcelEscape(out, c);
-          ++p;
-          continue;
-        }
-        if (len == 3 && c == 0xEF && p[1] == 0xBF && p[2] >= 0xBE)
-        {
-          appendExcelEscape(out, 0xFFC0u | (p[2] & 0x3Fu)); // U+FFFE / U+FFFF
-          p += 3;
-          continue;
-        }
-        if (isExcelEscape(p))
-        {
-          out += "_x005F_"; // the '_' itself; "xHHHH_" follows as plain text
-          ++p;
-          continue;
-        }
-      }
-
       out.append(reinterpret_cast<const char *>(p), len);
       p += len;
-    }
-    return out;
-  }
-
-  std::string decodeExcelEscapes(const std::string &text)
-  {
-    if (text.find("_x") == std::string::npos && text.find("_X") == std::string::npos)
-      return text;
-
-    std::string out;
-    const unsigned char *p = reinterpret_cast<const unsigned char *>(text.c_str());
-    while (*p)
-    {
-      if (isExcelEscape(p))
-      {
-        unsigned long cu = strtoul(std::string(reinterpret_cast<const char *>(p + 2), 4).c_str(), nullptr, 16);
-        if (cu < 0x20 || cu == 0x5F)
-        {
-          if (cu != 0)
-            out.push_back(static_cast<char>(cu));
-          p += 7;
-          continue;
-        }
-        if (cu == 0xFFFE || cu == 0xFFFF)
-        {
-          out.push_back(static_cast<char>(0xEF));
-          out.push_back(static_cast<char>(0xBF));
-          out.push_back(static_cast<char>(0x80 | (cu & 0x3F)));
-          p += 7;
-          continue;
-        }
-      }
-      out.push_back(static_cast<char>(*p++));
     }
     return out;
   }
@@ -393,112 +155,6 @@ namespace ExcelXlsxCore
     char buf[32];
     int n = snprintf(buf, sizeof(buf), "%.15g", value);
     return n > 0 ? static_cast<size_t>(n) : 0;
-  }
-
-  //----------------------------------------------------------------------------
-  // Cell formats
-  //----------------------------------------------------------------------------
-
-  XLStyleIndex createBoldHeaderFormat(XLDocument &doc)
-  {
-    XLStyleIndex boldFontIdx = doc.styles().fonts().create(
-      doc.styles().fonts().fontByIndex(0));
-    doc.styles().fonts().fontByIndex(boldFontIdx).setBold(true);
-
-    XLStyleIndex boldFmtIdx = doc.styles().cellFormats().create(
-      doc.styles().cellFormats().cellFormatByIndex(0));
-    doc.styles().cellFormats().cellFormatByIndex(boldFmtIdx)
-      .setFontIndex(boldFontIdx);
-    doc.styles().cellFormats().cellFormatByIndex(boldFmtIdx)
-      .setApplyFont(true);
-
-    return boldFmtIdx;
-  }
-
-  XLStyleIndex createDateTimeFormat(XLDocument &doc)
-  {
-    XLStyleIndex dateTimeFmtIdx = doc.styles().cellFormats().create(
-      doc.styles().cellFormats().cellFormatByIndex(0));
-    doc.styles().cellFormats().cellFormatByIndex(dateTimeFmtIdx)
-      .setNumberFormatId(EXCEL_FMT_DATE_TIME);
-    doc.styles().cellFormats().cellFormatByIndex(dateTimeFmtIdx)
-      .setApplyNumberFormat(true);
-
-    return dateTimeFmtIdx;
-  }
-
-  //----------------------------------------------------------------------------
-  // Date-format detection
-  //   OpenXLSX reports dates as XLValueType::Float. We inspect the cell's
-  //   number-format to tell dates from plain numbers.
-  //----------------------------------------------------------------------------
-
-  bool isBuiltinDateFormatId(unsigned int id)
-  {
-    return (id >= 14 && id <= 22)
-        || (id >= 27 && id <= 36)
-        || id == 45 || id == 47;
-  }
-
-  bool isDateFormatCode(const std::string &code)
-  {
-    bool inQuote = false;
-    bool inBracket = false;
-    std::string bracket;
-
-    for (size_t i = 0; i < code.size(); i++)
-    {
-      char c = code[i];
-
-      if (c == '"') { inQuote = !inQuote; continue; }
-      if (inQuote) continue;
-      if (c == '\\') { i++; continue; } // skip escaped char
-      if (c == '[') { inBracket = true; bracket.clear(); continue; }
-      if (c == ']')
-      {
-        inBracket = false;
-        if (!bracket.empty()
-         && bracket.find_first_not_of("hHmMsS") == std::string::npos)
-          return false;
-        continue;
-      }
-      if (inBracket) { bracket.push_back(c); continue; }
-
-      char lower = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-      if (lower == 'y' || lower == 'm' || lower == 'd'
-       || lower == 'h' || lower == 's')
-        return true;
-    }
-    return false;
-  }
-
-  bool isDateCell(XLCell &cell, const XLStyles &styles,
-                  std::unordered_map<XLStyleIndex, bool> &dateCache)
-  {
-    try
-    {
-      XLStyleIndex styleIdx = cell.cellFormat();
-      auto it = dateCache.find(styleIdx);
-      if (it != dateCache.end())
-        return it->second;
-
-      auto fmt = styles.cellFormats().cellFormatByIndex(styleIdx);
-      unsigned int fmtId = fmt.numberFormatId();
-      bool isDate = isBuiltinDateFormatId(fmtId);
-      if (!isDate && fmtId >= 164)
-      {
-        std::string code = styles.numberFormats()
-                                 .numberFormatById(fmtId)
-                                 .formatCode();
-        isDate = isDateFormatCode(code);
-      }
-      dateCache[styleIdx] = isDate;
-      return isDate;
-    }
-    catch (...)
-    {
-      return false;
-    }
   }
 
   //----------------------------------------------------------------------------
@@ -588,125 +244,6 @@ namespace ExcelXlsxCore
   }
 
   //----------------------------------------------------------------------------
-  // Cell values
-  //----------------------------------------------------------------------------
-
-  std::string rawNumberText(const XLCell &cell)
-  {
-    // Reused: constructing a stream per cell dominated the cost.
-    static thread_local std::ostringstream xml;
-    xml.str(std::string());
-    xml.clear();
-    cell.print(xml);
-    const std::string node = xml.str();
-    size_t begin = node.find("<v>");
-    size_t end = node.find("</v>");
-    if (begin == std::string::npos || end == std::string::npos || end < begin)
-      return std::string();
-    return node.substr(begin + 3, end - begin - 3);
-  }
-
-  bool cellNumber(const XLCell &cell, const XLCellValue &val, CellNumber &out)
-  {
-    if (val.type() == XLValueType::Float)
-    {
-      out.value = val.get<double>();
-      return true;
-    }
-    if (val.type() != XLValueType::Integer)
-      return false;
-
-    out.integer = val.get<int64_t>();
-    out.value = static_cast<double>(out.integer);
-    out.isInteger = true;
-
-    // OpenXLSX parses Integer text with as_llong, which stops at an exponent
-    // ("1E+20" becomes 1) and clamps values beyond int64 to its limits.
-    // Exponent notation always has a one-digit mantissa, so only results
-    // -9..9 and the two limits need re-parsing from the XML.
-    bool maybeExponent = out.integer >= -9 && out.integer <= 9;
-    bool maybeOverflow = out.integer == INT64_MAX || out.integer == INT64_MIN;
-    if (maybeExponent || maybeOverflow)
-    {
-      std::string text = rawNumberText(cell);
-      bool reparse = text.find_first_of("eE") != std::string::npos;
-      if (!reparse && maybeOverflow)
-      {
-        errno = 0;
-        strtoll(text.c_str(), nullptr, 10);
-        reparse = errno == ERANGE;
-      }
-      if (reparse)
-      {
-        out.value = strtod(text.c_str(), nullptr);
-        out.isInteger = false;
-      }
-    }
-    return true;
-  }
-
-  bool isDateNumber(const CellNumber &num, XLCell &cell, const XLStyles &styles,
-                    std::unordered_map<XLStyleIndex, bool> &dateCache)
-  {
-    return num.value >= 1.0 && isDateCell(cell, styles, dateCache);
-  }
-
-  bool isUncachedFormula(const XLCell &cell, const XLCellValue &val)
-  {
-    return cell.hasFormula()
-        && val.type() != XLValueType::String
-        && rawNumberText(cell).empty();
-  }
-
-  std::string headerText(XLCell &cell, const XLStyles &styles,
-                         std::unordered_map<XLStyleIndex, bool> &dateCache,
-                         ReadState &state)
-  {
-    XLCellValue val = cell.value();
-
-    if (isUncachedFormula(cell, val))
-      return std::string();
-
-    CellNumber num;
-    if (cellNumber(cell, val, num))
-    {
-      if (isDateNumber(num, cell, styles, dateCache))
-      {
-        // Only the calendar fields are used, so the CTRL time range is irrelevant.
-        std::tm tm{};
-        int16_t milli = 0;
-        time_t sec = 0;
-        serialToLocalTime(num.value, tm, milli, sec, std::numeric_limits<time_t>::max(), state);
-
-        bool hasTime = tm.tm_hour != 0 || tm.tm_min != 0 || tm.tm_sec != 0;
-        char buf[32];
-        strftime(buf, sizeof(buf), hasTime ? "%Y-%m-%d %H:%M:%S" : "%Y-%m-%d", &tm);
-        return buf;
-      }
-
-      if (num.isInteger)
-        return std::to_string(num.integer);
-
-      double intpart;
-      if (modf(num.value, &intpart) == 0.0 && fabs(intpart) < 1e15)
-        return std::to_string(static_cast<long long>(intpart));
-      char buf[32];
-      snprintf(buf, sizeof(buf), "%.15g", num.value);
-      return buf;
-    }
-
-    switch (val.type())
-    {
-      case XLValueType::String:
-        return decodeExcelEscapes(val.get<std::string>());
-      case XLValueType::Boolean:
-        return val.get<bool>() ? "TRUE" : "FALSE";
-      default:
-        return std::string();
-    }
-  }
-
-  //----------------------------------------------------------------------------
   // Sheet names
   //----------------------------------------------------------------------------
 
@@ -715,7 +252,7 @@ namespace ExcelXlsxCore
     std::unordered_set<std::u32string> seen;
     for (std::string &name : names)
     {
-      name = toXmlUtf8(name.c_str(), false);
+      name = toValidUtf8(name.c_str());
 
       std::string quoted = "sheet name '" + name + "'";
       if (name.empty())
@@ -738,5 +275,226 @@ namespace ExcelXlsxCore
         return quoted + " duplicates another sheet name (Excel ignores case)";
     }
     return std::string();
+  }
+
+  //----------------------------------------------------------------------------
+  // Cell values
+  //----------------------------------------------------------------------------
+
+  IntegerFit integerFit(double value, int64_t &integer)
+  {
+    double intpart;
+    if (!std::isfinite(value) || std::modf(value, &intpart) != 0.0)
+      return IntegerFit::None;
+    // 2^63 is exactly representable; every whole double below it converts.
+    if (intpart < -9223372036854775808.0 || intpart >= 9223372036854775808.0)
+      return IntegerFit::None;
+    integer = static_cast<int64_t>(intpart);
+    return (integer >= INT_MIN && integer <= INT_MAX) ? IntegerFit::Int : IntegerFit::Long;
+  }
+
+  bool isDateCell(const cxlsx_cell &cell)
+  {
+    return cell.type == CXLSX_DATETIME && cell.number >= 1.0;
+  }
+
+  std::string headerText(const cxlsx_cell &cell, ReadState &state)
+  {
+    switch (cell.type)
+    {
+      case CXLSX_TEXT:
+        return cellText(cell);
+      case CXLSX_BOOL:
+        return cell.boolean ? "TRUE" : "FALSE";
+      case CXLSX_DATETIME:
+      case CXLSX_DURATION:
+      case CXLSX_NUMBER:
+        break;
+      default: // errors, uncalculated formulas
+        return std::string();
+    }
+
+    if (isDateCell(cell))
+    {
+      // Only the calendar fields are used, so the CTRL time range is irrelevant.
+      std::tm tm{};
+      int16_t milli = 0;
+      time_t sec = 0;
+      serialToLocalTime(cell.number, tm, milli, sec, std::numeric_limits<time_t>::max(), state);
+
+      bool hasTime = tm.tm_hour != 0 || tm.tm_min != 0 || tm.tm_sec != 0;
+      char buf[32];
+      strftime(buf, sizeof(buf), hasTime ? "%Y-%m-%d %H:%M:%S" : "%Y-%m-%d", &tm);
+      return buf;
+    }
+
+    // Whole numbers without decimals, as long as a double holds them exactly.
+    int64_t integer = 0;
+    if (integerFit(cell.number, integer) != IntegerFit::None && std::fabs(cell.number) < 9007199254740992.0)
+      return std::to_string(integer);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.15g", cell.number);
+    return buf;
+  }
+
+  //----------------------------------------------------------------------------
+  // The xlsx library
+  //----------------------------------------------------------------------------
+
+  namespace
+  {
+    // Receives the library's error message. set() runs inside the library
+    // and must not throw.
+    struct ErrorSink
+    {
+      std::string message = "unknown error";
+      cxlsx_error c{this, &ErrorSink::set};
+
+      static void set(void *ctx, const char *msg, size_t len)
+      {
+        try
+        {
+          static_cast<ErrorSink *>(ctx)->message.assign(msg, len);
+        }
+        catch (...)
+        {
+        }
+      }
+
+      [[noreturn]] void raise() const { throw std::runtime_error(message); }
+    };
+
+    void check(bool ok, const ErrorSink &error)
+    {
+      if (!ok)
+        error.raise();
+    }
+
+    // Calls the SheetVisitor from the library's callbacks; an exception is
+    // kept and rethrown after the library returns, it must not unwind
+    // through Rust.
+    struct VisitorThunk
+    {
+      SheetVisitor &visitor;
+      std::exception_ptr error;
+
+      template <typename Fn>
+      static bool call(void *ctx, Fn &&fn)
+      {
+        VisitorThunk &self = *static_cast<VisitorThunk *>(ctx);
+        try
+        {
+          return fn(self.visitor);
+        }
+        catch (...)
+        {
+          self.error = std::current_exception();
+          return false;
+        }
+      }
+
+      static bool begin(void *ctx, uint32_t rows, uint32_t columns)
+      {
+        return call(ctx, [&](SheetVisitor &v) { return v.begin(rows, columns); });
+      }
+
+      static bool row(void *ctx, uint32_t row, bool hidden)
+      {
+        return call(ctx, [&](SheetVisitor &v) { return v.row(row, hidden); });
+      }
+
+      static bool cell(void *ctx, const cxlsx_cell *cell)
+      {
+        return call(ctx, [&](SheetVisitor &v) { return v.cell(*cell); });
+      }
+    };
+  }
+
+  Workbook::Workbook(const std::string &path)
+  {
+    ErrorSink error;
+    m_book = cxlsx_book_open(path.data(), path.size(), &error.c);
+    if (!m_book)
+      error.raise();
+  }
+
+  Workbook::~Workbook()
+  {
+    cxlsx_book_close(m_book);
+  }
+
+  std::vector<std::string> Workbook::sheetNames() const
+  {
+    std::vector<std::string> names;
+    const size_t count = cxlsx_book_sheet_count(m_book);
+    names.reserve(count);
+    for (size_t i = 0; i < count; ++i)
+    {
+      size_t len = 0;
+      const char *name = cxlsx_book_sheet_name(m_book, i, &len);
+      names.emplace_back(name ? name : "", len);
+    }
+    return names;
+  }
+
+  void Workbook::readSheet(const std::string &name, SheetVisitor &visitor)
+  {
+    VisitorThunk thunk{visitor, nullptr};
+    const cxlsx_sheet_visitor callbacks{&thunk, &VisitorThunk::begin, &VisitorThunk::row, &VisitorThunk::cell};
+    ErrorSink error;
+    int status = cxlsx_book_read_sheet(m_book, name.data(), name.size(), &callbacks, &error.c);
+    if (thunk.error)
+      std::rethrow_exception(thunk.error);
+    if (status == CXLSX_FAILED)
+      error.raise();
+  }
+
+  WorkbookWriter::WorkbookWriter()
+    : m_writer(cxlsx_writer_new())
+  {
+    if (!m_writer)
+      throw std::bad_alloc();
+  }
+
+  WorkbookWriter::~WorkbookWriter()
+  {
+    cxlsx_writer_free(m_writer);
+  }
+
+  void WorkbookWriter::addSheet(const std::string &name)
+  {
+    ErrorSink error;
+    check(cxlsx_writer_add_sheet(m_writer, name.data(), name.size(), &error.c), error);
+  }
+
+  void WorkbookWriter::text(uint32_t row, uint32_t column, const std::string &utf8, CellStyle style)
+  {
+    ErrorSink error;
+    check(cxlsx_writer_text(m_writer, row, column, utf8.data(), utf8.size(),
+                            static_cast<uint32_t>(style), &error.c), error);
+  }
+
+  void WorkbookWriter::number(uint32_t row, uint32_t column, double value, CellStyle style)
+  {
+    ErrorSink error;
+    check(cxlsx_writer_number(m_writer, row, column, value, static_cast<uint32_t>(style), &error.c), error);
+  }
+
+  void WorkbookWriter::boolean(uint32_t row, uint32_t column, bool value, CellStyle style)
+  {
+    ErrorSink error;
+    check(cxlsx_writer_bool(m_writer, row, column, value, static_cast<uint32_t>(style), &error.c), error);
+  }
+
+  void WorkbookWriter::columnWidth(uint32_t column, double width)
+  {
+    ErrorSink error;
+    check(cxlsx_writer_column_width(m_writer, column, width, &error.c), error);
+  }
+
+  void WorkbookWriter::save(const std::string &path)
+  {
+    ErrorSink error;
+    check(cxlsx_writer_save(m_writer, path.data(), path.size(), &error.c), error);
   }
 }

@@ -558,8 +558,8 @@ bool excelWriteFileWrongTypeTest()
   return pass;
 }
 
-// A time at exactly midnight has a whole-number serial, which OpenXLSX types
-// as integer; it must still come back as a time, not an int.
+// A time at exactly midnight has a whole-number serial; it must still come
+// back as a time, not an int.
 bool excelMidnightDateTest()
 {
   time t = makeTime(2026, 1, 1);
@@ -579,8 +579,7 @@ bool excelMidnightDateTest()
   return pass;
 }
 
-// Large floats are stored in exponent notation ("1e+20"); OpenXLSX's integer
-// parsing would read that as 1.
+// Large floats must round-trip, whatever notation the file uses for them.
 bool excelLargeFloatTest()
 {
   float big = 1e20;
@@ -702,15 +701,15 @@ bool excelFixtureTest()
 
   // 1960 is outside CTRL time: the Excel serial as float.
   if (getType(byLabel["pre1970"]) != FLOAT_VAR || byLabel["pre1970"] != 22037) dynAppend(failed, "pre1970");
-  // Whole-number date serial (typed integer by OpenXLSX).
+  // Whole-number date serial (no decimal point in the file).
   if (getType(byLabel["dateInt"]) != TIME_VAR || byLabel["dateInt"] != makeTime(2026, 1, 1)) dynAppend(failed, "dateInt");
   // [h]:mm is a duration, not a date.
   if (getType(byLabel["duration"]) != FLOAT_VAR || byLabel["duration"] != 1.5) dynAppend(failed, "duration");
   if (byLabel["error"] != "#DIV/0!") dynAppend(failed, "error");
   if (byLabel["uncached"] != "") dynAppend(failed, "uncached");
   if (byLabel["crlf"] != "a\r\nb") dynAppend(failed, "crlf");
-  // Printable _xHHHH_ stays literal.
-  if (byLabel["literal"] != "AB_x0041_7") dynAppend(failed, "literal");
+  // Every _xHHHH_ escape is decoded, also printable ones written verbatim by other tools.
+  if (byLabel["literal"] != "ABA7") dynAppend(failed, "literal");
   if (byLabel["exponent"] != 1e20) dynAppend(failed, "exponent");
   if (getType(byLabel["bigint"]) != FLOAT_VAR || byLabel["bigint"] < 1.2e19) dynAppend(failed, "bigint");
   if (byLabel["after"] != "last") dynAppend(failed, "after");
