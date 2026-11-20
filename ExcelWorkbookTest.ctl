@@ -349,7 +349,7 @@ bool excelWorkbookFixtureTest()
   // Unrepresentable date and uncached formula: warnings, the load succeeds.
   if (!book.load()) dynAppend(failed, "load: " + book.getMessageText());
   if (dynlen(book.getMessages()) != 2) dynAppend(failed, "warnings " + dynlen(book.getMessages()));
-  if (book.getSheetNames() != makeDynString("Fixture", "Implicit")) dynAppend(failed, "file order");
+  if (book.getSheetNames() != makeDynString("Fixture", "Implicit", "Hidden")) dynAppend(failed, "file order");
 
   shared_ptr<ExcelSheet> fixture = book.getSheet("Fixture");
   if (fixture == nullptr || dynlen(fixture.findRows("Label", "after")) != 1) dynAppend(failed, "Fixture rows");

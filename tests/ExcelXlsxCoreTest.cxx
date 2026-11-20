@@ -445,7 +445,7 @@ void fixtureTest()
   }
 
   Workbook book(fixturePath);
-  CHECK(book.sheetNames() == std::vector<std::string>({"Fixture", "Implicit"}));
+  CHECK(book.sheetNames() == std::vector<std::string>({"Fixture", "Implicit", "Hidden"}));
 
   Recorder rec;
   book.readSheet("Fixture", rec);

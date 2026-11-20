@@ -89,7 +89,7 @@ fn text(t: &str) -> CellValue<'static> {
 #[test]
 fn fixture_sheet_names() {
     let book = Book::open(&fixture()).unwrap();
-    assert_eq!(book.sheet_names(), ["Fixture", "Implicit"]);
+    assert_eq!(book.sheet_names(), ["Fixture", "Implicit", "Hidden"]);
 }
 
 #[test]
@@ -372,4 +372,126 @@ fn date1904_serials_are_converted() {
     );
     std::fs::remove_file(&written).unwrap();
     std::fs::remove_file(&patched).unwrap();
+}
+
+#[test]
+fn fixture_hidden_rows() {
+    let rec = read(&fixture(), "Hidden");
+    let rows: Vec<Event> = rec
+        .events
+        .iter()
+        .filter(|e| !matches!(e, Event::Cell(..)))
+        .cloned()
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            Event::Begin(5, 2),
+            Event::Row(1, true),
+            Event::Row(2, false),
+            Event::Row(3, true),
+            Event::Row(4, true),
+            Event::Row(5, false)
+        ]
+    );
+    assert_eq!(rec.value(3, 1), Some(text("hidden")));
+}
+
+/// A package with one sheet "S" whose <sheetData> is sheet_data (numbers only).
+fn minimal_xlsx(path: &Path, sheet_data: &str) {
+    use std::io::Write;
+    let parts = [
+        ("[Content_Types].xml", r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#.to_string()),
+        ("_rels/.rels", r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#.to_string()),
+        ("xl/workbook.xml", r#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="S" sheetId="1" r:id="rId1"/></sheets></workbook>"#.to_string()),
+        ("xl/_rels/workbook.xml.rels", r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#.to_string()),
+        ("xl/worksheets/sheet1.xml", format!(r#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{sheet_data}</sheetData></worksheet>"#)),
+    ];
+    let mut writer = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+    for (name, data) in parts {
+        writer
+            .start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(data.as_bytes()).unwrap();
+    }
+    writer.finish().unwrap();
+}
+
+#[test]
+fn rows_out_of_order_are_skipped() {
+    let path = temp("out_of_order");
+    minimal_xlsx(
+        &path,
+        r#"<row r="1"><c r="A1"><v>1</v></c></row><row r="5"><c r="A5"><v>5</v></c></row><row r="3"><c r="A3"><v>3</v></c></row><row r="6"><c r="A6"><v>6</v></c></row>"#,
+    );
+    let rec = read(&path, "S");
+    let rows: Vec<Event> = rec
+        .events
+        .iter()
+        .filter(|e| !matches!(e, Event::Cell(..)))
+        .cloned()
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            Event::Begin(6, 1),
+            Event::Row(1, false),
+            Event::Row(5, false),
+            Event::Row(6, false)
+        ]
+    );
+    assert_eq!(rec.value(3, 1), None);
+    assert_eq!(rec.value(6, 1), Some(CellValue::Number(6.0)));
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn save_writes_through_symlinks_and_keeps_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let target = temp("link_target");
+    let link = temp("link");
+    std::fs::write(&target, b"old").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let mut w = Writer::new();
+    w.add_sheet("S").unwrap();
+    w.save(&link).unwrap();
+
+    assert!(
+        link.symlink_metadata().unwrap().file_type().is_symlink(),
+        "the link stays a link"
+    );
+    assert_eq!(Book::open(&target).unwrap().sheet_names(), ["S"]);
+    assert_eq!(
+        std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+    std::fs::remove_file(&link).unwrap();
+    std::fs::remove_file(&target).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn save_writes_through_a_link_to_a_missing_file() {
+    let target = temp("dangling_target");
+    let link = temp("dangling_link");
+    let _ = std::fs::remove_file(&target);
+    let _ = std::fs::remove_file(&link);
+    // relative, as links usually are
+    std::os::unix::fs::symlink(target.file_name().unwrap(), &link).unwrap();
+
+    let mut w = Writer::new();
+    w.add_sheet("S").unwrap();
+    w.save(&link).unwrap();
+
+    assert!(
+        link.symlink_metadata().unwrap().file_type().is_symlink(),
+        "the link stays a link"
+    );
+    assert_eq!(Book::open(&target).unwrap().sheet_names(), ["S"]);
+    std::fs::remove_file(&link).unwrap();
+    std::fs::remove_file(&target).unwrap();
 }

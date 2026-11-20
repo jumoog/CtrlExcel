@@ -71,19 +71,26 @@ namespace
     return width <= EXCEL_MAX_CELL_CHARS;
   }
 
+  // Sets key to value in row, which takes ownership of value. The cloning
+  // setAt(const Variable &, const Variable &) would copy every value once more.
+  void put(MappingVar &row, const Variable &key, Variable *value)
+  {
+    row.setAt(key.clone(), value);
+  }
+
   void setNumber(MappingVar &row, const Variable &key, double value)
   {
     int64_t integer = 0;
     switch (integerFit(value, integer))
     {
       case IntegerFit::Int:
-        row.setAt(key, IntegerVar(static_cast<int>(integer)));
+        put(row, key, new IntegerVar(static_cast<int>(integer)));
         break;
       case IntegerFit::Long:
-        row.setAt(key, LongVar(integer));
+        put(row, key, new LongVar(integer));
         break;
       default:
-        row.setAt(key, FloatVar(value));
+        put(row, key, new FloatVar(value));
         break;
     }
   }
@@ -99,7 +106,7 @@ namespace
     switch (cell.type)
     {
       case CXLSX_UNCACHED_FORMULA:
-        row.setAt(key, TextVar(""));
+        put(row, key, new TextVar(""));
         ++state.uncachedFormulas;
         return true;
 
@@ -112,12 +119,12 @@ namespace
           LocalTime converted = serialToLocalTime(cell.number, tm, milli, sec, TimeVar::MaxTimeVarSec, state);
           if (converted == LocalTime::OutOfRange)
           {
-            row.setAt(key, FloatVar(cell.number));
+            put(row, key, new FloatVar(cell.number));
             ++state.unrepresentableDates;
           }
           else
           {
-            row.setAt(key, TimeVar(sec, milli));
+            put(row, key, new TimeVar(sec, milli));
             if (converted == LocalTime::Shifted)
               ++state.shiftedTimes;
           }
@@ -132,21 +139,21 @@ namespace
         return true;
 
       case CXLSX_BOOL:
-        row.setAt(key, BitVar(cell.boolean));
+        put(row, key, new BitVar(cell.boolean));
         return true;
 
       case CXLSX_TEXT:
-        row.setAt(key, TextVar(cellText(cell).c_str()));
+        put(row, key, new TextVar(cell.text ? cell.text : "", cell.text_len));
         return true;
 
       case CXLSX_ERROR:
         // Keep Excel's error code (#DIV/0!, #N/A, ...) so a failed formula is
         // distinguishable from an empty cell.
-        row.setAt(key, TextVar(cell.text_len ? cellText(cell).c_str() : "#ERROR"));
+        put(row, key, cell.text_len ? new TextVar(cell.text, cell.text_len) : new TextVar("#ERROR"));
         return true;
 
       default:
-        row.setAt(key, TextVar(""));
+        put(row, key, new TextVar(""));
         return false;
     }
   }
@@ -193,7 +200,7 @@ namespace
         return true;
 
       m_inRow = true;
-      m_row = MappingVar();
+      m_row.reset(new MappingVar);
       m_hasValue = false;
       m_lastColumn = 0;
       return true;
@@ -226,8 +233,8 @@ namespace
       if (!m_inRow || column <= m_lastColumn)
         return true;
       while (++m_lastColumn < column)
-        m_row.setAt(*m_keys[m_lastColumn - 1], TextVar(""));
-      m_hasValue = setCell(m_row, *m_keys[column - 1], cell, m_state) || m_hasValue;
+        put(*m_row, *m_keys[m_lastColumn - 1], new TextVar(""));
+      m_hasValue = setCell(*m_row, *m_keys[column - 1], cell, m_state) || m_hasValue;
       return true;
     }
 
@@ -273,11 +280,14 @@ namespace
         return;
       m_inRow = false;
       while (++m_lastColumn <= m_colCount)
-        m_row.setAt(*m_keys[m_lastColumn - 1], TextVar(""));
+        put(*m_row, *m_keys[m_lastColumn - 1], new TextVar(""));
       // A sheet's rows include rows that only carry formatting (fill,
       // height); by default rows without any value are not records.
+      // append(VariablePtr) takes the row over; append(const Variable &)
+      // would copy it with all its keys and values.
       if (m_hasValue || !m_skipEmpty)
-        m_result.append(m_row);
+        m_result.append(m_row.release());
+      m_row.reset();
     }
 
     DynVar &m_result;
@@ -295,7 +305,7 @@ namespace
     uint32_t m_nextRow;        // Excel row the next result entry stands for
     bool m_inHeader = false;
     bool m_inRow = false;      // a data row is being built in m_row
-    MappingVar m_row;
+    std::unique_ptr<MappingVar> m_row;
     bool m_hasValue = false;
     uint16_t m_lastColumn = 0; // columns of m_row set so far
   };

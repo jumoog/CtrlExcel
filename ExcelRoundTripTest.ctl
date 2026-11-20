@@ -741,6 +741,15 @@ bool excelFixtureTest()
            || padded[5]["Value"] != 4)
     dynAppend(failed, "implicit: padded rows");
 
+  // Sheet "Hidden": the header row 1, data row 3 and the empty row 4 are
+  // hidden. A hidden header row still supplies the keys.
+  checkHiddenSheet(filename, TRUE, TRUE, makeDynString("shown", "shownAfter"), failed);
+  checkHiddenSheet(filename, FALSE, TRUE, makeDynString("shown", "hidden", "shownAfter"), failed);
+  // Hidden rows are left out entirely, also with skipEmptyRows = FALSE...
+  checkHiddenSheet(filename, TRUE, FALSE, makeDynString("shown", "shownAfter"), failed);
+  // ...and with both FALSE, rows[i] is Excel row i + 1.
+  checkHiddenSheet(filename, FALSE, FALSE, makeDynString("shown", "hidden", "", "shownAfter"), failed);
+
   bool pass = dynlen(failed) == 0;
 
   if (!pass)
@@ -750,6 +759,27 @@ bool excelFixtureTest()
 
   DebugTN("excelFixtureTest", "pass", pass);
   return pass;
+}
+
+// Reads the fixture's sheet "Hidden" (headers on) and compares its "Label"
+// column with expected.
+void checkHiddenSheet(string filename, bool skipHidden, bool skipEmpty, dyn_string expected,
+                      dyn_string &failed)
+{
+  dyn_mapping rows = excelReadSheet(filename, "Hidden", skipHidden, TRUE, skipEmpty);
+  dyn_string labels;
+
+  for (int i = 1; i <= dynlen(rows); i++)
+  {
+    dynAppend(labels, mappingHasKey(rows[i], "Label") ? rows[i]["Label"] : "<no Label key>");
+  }
+
+  if (labels != expected)
+  {
+    dynAppend(failed, "hidden: skipHiddenRows " + skipHidden + ", skipEmptyRows " + skipEmpty);
+    DebugTN("excelFixtureTest: sheet Hidden", "skipHiddenRows", skipHidden, "skipEmptyRows", skipEmpty,
+            "labels", labels, "expected", expected);
+  }
 }
 
 // excelWriteFile with an empty mapping writes a workbook with one empty sheet

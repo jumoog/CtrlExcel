@@ -13,6 +13,8 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 calamine = "0.38"
+# the row scan of scan.rs
+memchr = "2"
 quick-xml = "0.42"
 # low-memory worksheets (rows go to a temporary file as they are written)
 rust_xlsxwriter = { version = "0.103", features = ["constant_memory"] }

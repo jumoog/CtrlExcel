@@ -97,6 +97,7 @@ name = "ctrlexcel-xlsx"
 version = "0.0.0"
 dependencies = [
  "calamine",
+ "memchr",
  "quick-xml",
  "rust_xlsxwriter",
  "zip",

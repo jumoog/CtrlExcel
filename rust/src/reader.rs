@@ -139,6 +139,11 @@ impl Book {
                 column: record.pos.1 + 1,
                 value,
             };
+            // A row stored after a later one (rows out of order) is skipped,
+            // as the layout scan does: rows reach the visitor ascending.
+            if cell.row < rows.current {
+                continue;
+            }
             if !rows.advance_to(cell.row, visitor) || !visitor.cell(&cell) {
                 return Err(ReadError::Stopped);
             }
@@ -180,7 +185,8 @@ impl<'a> RowCursor<'a> {
             self.current = number;
         }
         if self.current != row {
-            // Not in the layout (rows out of order): calamine's position wins.
+            // Not in the layout (e.g. calamine numbers a row without r
+            // differently): calamine's position wins.
             self.current = row;
             return visitor.row(row, false);
         }

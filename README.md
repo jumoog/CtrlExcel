@@ -26,7 +26,7 @@ dyn_mapping excelReadSheet(string filename, string sheetName, bool skipHiddenRow
 Reads a sheet and returns each data row as a `mapping`.
 
 - **sheetName** — pass an empty string to read the first worksheet.
-- **skipHiddenRows** — optional, defaults to `TRUE`. When `TRUE`, hidden rows are omitted.
+- **skipHiddenRows** — optional, defaults to `TRUE`. When `TRUE`, hidden rows are omitted (also with `skipEmptyRows = FALSE`). A hidden first row still supplies the column names.
 - **firstRowIsColumnNames** — optional, defaults to `TRUE`. When `TRUE`, the first row supplies the mapping keys as strings. When `FALSE`, keys are 1-based column integers.
 - **skipEmptyRows** — optional, defaults to `TRUE`. When `TRUE`, rows without any value (e.g. rows that only carry formatting) are omitted. With `skipHiddenRows = FALSE` and `skipEmptyRows = FALSE`, `rows[i]` is Excel row `i + 1` (or row `i` when `firstRowIsColumnNames = FALSE`), so scripts can report Excel row numbers. Note that this returns every row up to the last one Excel stored, so a single stray formatted cell far down (e.g. row 1048576) makes the result that long.
 
@@ -101,7 +101,7 @@ bool excelWriteSheet(string filename, string sheetName, dyn_anytype data)
 Writes a `dyn_anytype` (containing mappings) to a single-sheet `.xlsx` file. The keys of all rows, in order of first appearance, become the column headers; a row without a key gets an empty cell in that column.
 
 - An empty **sheetName** writes `Sheet1`. Sheet names must follow Excel's rules: at most 31 characters, none of `\ / ? * [ ] :`, no leading or trailing apostrophe, not `History`, and unique ignoring case.
-- Characters XML cannot store as-is (control characters, carriage return) are written as Excel's `_xHHHH_` escapes, and text that itself looks like an escape (e.g. a part number `AB_x0041_7`) is escaped as well, so texts round-trip exactly. On read, every `_xHHHH_` escape is decoded, as the file format specifies: also the ones other tools write for printable characters, so a file whose cell holds `AB_x0041_7` without that escaping reads as `ABA7`. A text longer than 32767 characters, Excel's cell limit, fails the write. Empty texts are not stored (as in Excel) and read back as `""` like any empty cell.
+- Characters XML cannot store as-is (control characters, carriage return) are written as Excel's `_xHHHH_` escapes, and text that itself looks like an escape (e.g. a part number `AB_x0041_7`) is escaped as well, so texts round-trip exactly. On read, every `_xHHHH_` escape is decoded, as the file format specifies: also the ones other tools write for printable characters, so a file whose cell holds `AB_x0041_7` without that escaping reads as `ABA7`. A text longer than 32767 characters, Excel's cell limit, fails the write. Empty texts are not stored (as in Excel) and read back as `""` like any empty cell, so a row whose values are all empty (or missing) has no cells and reads back only with `skipEmptyRows = FALSE`.
 - More than 1048575 data rows or 16384 columns (Excel's sheet size) fail the write. Column widths follow the longest value, capped at Excel's maximum of 255.
 
 ```ctrl
@@ -226,10 +226,12 @@ Reading and writing take time in proportion to the sheet size. Measured inside a
 |---|---:|---:|---:|
 | Write 10,000 × 10 | 0.30 s¹ | 0.18 s | 0.08 s |
 | Write 100,000 × 10 | 20.6 s¹ | 1.77 s | 0.83 s |
-| Read 10,000 × 10 | 0.51 s¹ | 0.10 s | 0.09 s |
-| Read 100,000 × 10 | 75 s¹ | 1.12 s | 0.87 s |
+| Read 10,000 × 10 | 0.51 s¹ | 0.10 s | 0.07 s |
+| Read 100,000 × 10 | 75 s¹ | 1.12 s | 0.73 s |
 
 ¹ OpenXLSX searched all rows for every row it read and all texts for every text it wrote, so the time grew with the square of the sheet size. Measured with a standalone benchmark of the read and write paths, without the conversion from and into CTRL variables, so inside a CTRL manager it took even longer.
+
+Of the 0.73 s for reading 100,000 rows, about 0.2 s is CTRL copying the returned `dyn_mapping` into the script's variable, which every CTRL function result goes through. `excelReadSheetAsync` hands the rows over without that copy and takes 0.54 s; prefer it for large sheets, also because it does not block the CTRL manager.
 
 ## Build
 

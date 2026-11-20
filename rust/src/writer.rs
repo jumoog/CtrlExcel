@@ -1,7 +1,8 @@
 //! Writing with rust_xlsxwriter. The file is written to a temporary file next
 //! to the target and renamed over it, so a failed write never leaves a
 //! partial file behind, and an existing file is only replaced once the new
-//! one is complete.
+//! one is complete. A symbolic link is followed (the file it points to is
+//! replaced), and the replaced file's permissions are kept on Unix.
 
 use rust_xlsxwriter::{DocProperties, Format, Formula, Workbook, Worksheet, XlsxError};
 use std::path::{Path, PathBuf};
@@ -162,16 +163,56 @@ impl Writer {
         if self.sheets == 0 {
             self.add_sheet("Sheet1")?;
         }
-        let temp = temp_path(path);
+        let target = rename_target(path);
+        let temp = temp_path(&target);
         let result = self
             .book
             .save(&temp)
             .map_err(message)
-            .and_then(|_| std::fs::rename(&temp, path).map_err(|e| e.to_string()));
+            .and_then(|_| keep_permissions(&target, &temp))
+            .and_then(|_| std::fs::rename(&temp, &target).map_err(|e| e.to_string()));
         if result.is_err() {
             let _ = std::fs::remove_file(&temp);
         }
         result
+    }
+}
+
+/// The file to replace: for a symbolic link the file it points to (also one
+/// that does not exist yet), so the rename writes through the link instead of
+/// replacing it.
+fn rename_target(path: &Path) -> PathBuf {
+    let mut target = path.to_path_buf();
+    // A bounded number of hops, as the OS allows: a link cycle stops here.
+    for _ in 0..40 {
+        let is_link = target
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink());
+        if !is_link {
+            break;
+        }
+        let Ok(link) = std::fs::read_link(&target) else {
+            break;
+        };
+        // A relative link is relative to the directory that holds it.
+        target = match target.parent() {
+            Some(dir) if link.is_relative() => dir.join(link),
+            _ => link,
+        };
+    }
+    target
+}
+
+/// Gives the new file the permissions of the one it replaces (a new file gets
+/// the process's defaults). Owner and ACLs are not carried over.
+fn keep_permissions(target: &Path, temp: &Path) -> Result<(), String> {
+    match std::fs::metadata(target) {
+        // On Windows the permissions are only the read-only flag, which would
+        // make the rename fail; the caller rejects read-only targets anyway.
+        Ok(meta) if cfg!(unix) => {
+            std::fs::set_permissions(temp, meta.permissions()).map_err(|e| e.to_string())
+        }
+        _ => Ok(()),
     }
 }
 

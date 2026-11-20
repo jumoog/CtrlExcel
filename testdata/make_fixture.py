@@ -5,11 +5,11 @@ from Excel or other tools, so this script writes the workbook XML directly,
 following Excel's conventions (shared strings, _xHHHH_ escapes, error cells,
 formulas without a cached value, integer date serials, custom number formats,
 formatted empty rows, missing rows, rows and cells without the optional r
-attribute). Only the Python standard library is used.
+attribute, hidden rows). Only the Python standard library is used.
 
     python testdata/make_fixture.py
 
-Sheets "Fixture" and "Implicit", columns Label | Value; the expected read
+Sheets "Fixture", "Implicit" and "Hidden", columns Label | Value; the expected read
 results are checked by excelFixtureTest() in ExcelRoundTripTest.ctl.
 """
 
@@ -103,6 +103,26 @@ def implicit_sheet_xml():
             '</worksheet>')
 
 
+def hidden_sheet_xml():
+    """Hidden rows as Excel writes them: the header row (still the header),
+    a data row (3) and a row without cells (4)."""
+    def text(t, ref):
+        return f'<c r="{ref}" t="s"><v>{sst(t)}</v></c>'
+    rows = [
+        f'<row r="1" hidden="1">{text("Label", "A1")}{text("Value", "B1")}</row>',
+        f'<row r="2">{text("shown", "A2")}<c r="B2"><v>1</v></c></row>',
+        f'<row r="3" hidden="1">{text("hidden", "A3")}<c r="B3"><v>2</v></c></row>',
+        '<row r="4" hidden="1"/>',
+        f'<row r="5">{text("shownAfter", "A5")}<c r="B5"><v>3</v></c></row>',
+    ]
+    return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            '<dimension ref="A1:B5"/>'
+            f'<sheetData>{"".join(rows)}</sheetData>'
+            '</worksheet>')
+
+
 def shared_strings_xml():
     items = ''.join(f'<si><t xml:space="preserve">{escape(t)}</t></si>' for t in shared_strings)
     n = len(shared_strings)
@@ -128,7 +148,7 @@ STYLES = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 
 WORKBOOK = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-<sheets><sheet name="Fixture" sheetId="1" r:id="rId1"/><sheet name="Implicit" sheetId="2" r:id="rId4"/></sheets>
+<sheets><sheet name="Fixture" sheetId="1" r:id="rId1"/><sheet name="Implicit" sheetId="2" r:id="rId4"/><sheet name="Hidden" sheetId="3" r:id="rId5"/></sheets>
 </workbook>'''
 
 WORKBOOK_RELS = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -137,6 +157,7 @@ WORKBOOK_RELS = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
 <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>
 <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>
+<Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/>
 </Relationships>'''
 
 ROOT_RELS = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -153,6 +174,7 @@ CONTENT_TYPES = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
 <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
 <Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+<Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
 <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
 <Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
 <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
@@ -162,8 +184,8 @@ CONTENT_TYPES = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 APP = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
 <Application>Microsoft Excel</Application>
-<HeadingPairs><vt:vector size="2" baseType="variant"><vt:variant><vt:lpstr>Worksheets</vt:lpstr></vt:variant><vt:variant><vt:i4>2</vt:i4></vt:variant></vt:vector></HeadingPairs>
-<TitlesOfParts><vt:vector size="2" baseType="lpstr"><vt:lpstr>Fixture</vt:lpstr><vt:lpstr>Implicit</vt:lpstr></vt:vector></TitlesOfParts>
+<HeadingPairs><vt:vector size="2" baseType="variant"><vt:variant><vt:lpstr>Worksheets</vt:lpstr></vt:variant><vt:variant><vt:i4>3</vt:i4></vt:variant></vt:vector></HeadingPairs>
+<TitlesOfParts><vt:vector size="3" baseType="lpstr"><vt:lpstr>Fixture</vt:lpstr><vt:lpstr>Implicit</vt:lpstr><vt:lpstr>Hidden</vt:lpstr></vt:vector></TitlesOfParts>
 </Properties>'''
 
 CORE = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -175,6 +197,7 @@ CORE = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 def main():
     sheet = sheet_xml()  # fills the shared string table
     implicit = implicit_sheet_xml()
+    hidden = hidden_sheet_xml()
     parts = {
         '[Content_Types].xml': CONTENT_TYPES,
         '_rels/.rels': ROOT_RELS,
@@ -186,6 +209,7 @@ def main():
         'xl/sharedStrings.xml': shared_strings_xml(),
         'xl/worksheets/sheet1.xml': sheet,
         'xl/worksheets/sheet2.xml': implicit,
+        'xl/worksheets/sheet3.xml': hidden,
     }
     with zipfile.ZipFile(OUTPUT, 'w', zipfile.ZIP_STORED) as z:
         for name, data in parts.items():
