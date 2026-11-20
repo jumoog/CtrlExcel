@@ -258,11 +258,17 @@ Copy the built library into your WinCC OA project's `bin/` directory:
 - Windows: `build/RelWithDebInfo/CtrlExcelReader.dll` (or `build/Debug/...`)
 - Linux: `build-linux-relwithdebinfo/CtrlExcelReader.so` (or `build-linux-debug/...`)
 
-Add the extension to your WinCC OA config file:
+Load the extension in every script that uses it (recommended by WinCC OA):
+
+```ctrl
+#uses "CtrlExcelReader"
+```
+
+Or load it for all scripts of a CTRL manager in the project's config file (`LoadCtrlLibs` is for CTRL script libraries, not extensions):
 
 ```text
 [ctrl]
-LoadCtrlLibs = "CtrlExcelReader"
+ctrlDLL = "CtrlExcelReader"
 ```
 
 ## Tests
@@ -277,6 +283,25 @@ LoadCtrlLibs = "CtrlExcelReader"
 
   GitHub Actions (`.github/workflows/ci.yml`) runs them on Linux and Windows.
 - **CTRL tests** (`ExcelRoundTripTest.ctl`) test the CTRL functions themselves and need a WinCC OA project with the extension loaded. Copy `testdata/CtrlExcelReaderFixture.xlsx` into the project's `data/` directory for the fixture test.
+
+### Build and test on Linux in Docker
+
+`docker/` builds the extension against the WinCC OA API on Debian and runs both test suites: the C++ tests and `ExcelRoundTripTest.ctl`, in a throw-away project with a CTRL manager that does not connect to Data/Event (`WCCOActrl -n`), so no database, PMON or license setup is needed.
+
+1. Build the WinCC OA image with the Dockerfile that comes with the WinCC OA Debian packages (it is not part of this repository):
+
+   ```sh
+   docker build -t winccoa321:3.21.7 path/to/WinCCOA-3.21.7-debian.x86_64
+   ```
+
+2. Build the build-and-test image on top of it, then run it with the sources mounted at `/src`:
+
+   ```sh
+   docker build -t ctrlexcel-build --build-arg BASE_IMAGE=winccoa321:3.21.7 docker
+   docker run --rm -v "$PWD:/src:ro" -v ctrlexcel-build:/build -v ctrlexcel-vcpkg:/home/winccoa/.cache/vcpkg-archives ctrlexcel-build
+   ```
+
+   The volume `ctrlexcel-build` keeps the build (`/build/cmake/CtrlExcelReader.so`) and the CTRL test log (`/build/ctrl-tests.log`); `ctrlexcel-vcpkg` caches the built vcpkg packages. The container exits with 0 only if everything built without warnings and every test passed. On Windows, use `-v "C:/path/to/CtrlExcel:/src:ro"`.
 
 ## Licenses
 

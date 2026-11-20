@@ -7,6 +7,10 @@ option(CTRLEXCEL_BUILD_TESTS "Build the C++ tests (tests/)" ON)
 
 if ( CTRLEXCEL_BUILD_EXTENSION )
   set(API_ROOT "$ENV{API_ROOT}" CACHE FILEPATH "directory of the WinCC_OA API installation")
+  # Linux: with VISIBILITY_HIDDEN, CMakeDefines marks the WinCC OA API
+  # (DLLEXP_*, incl. CTRLEXT_EXPORT of the entry points) visible, so the
+  # extension itself can be built with hidden visibility (see below).
+  set(VISIBILITY_HIDDEN ON CACHE BOOL "compile with hidden symbol visibility" FORCE)
   include(${API_ROOT}/CMakeDefines.txt)
 else()
   set(CMAKE_CXX_STANDARD 17)
@@ -32,7 +36,7 @@ if ( CTRLEXCEL_BUILD_EXTENSION )
   set(TARGET CtrlExcelReader)
 
   set(SOURCES
-  ExternHdl.cxx
+  ExcelExternHdl.cxx
   ExcelXlsxHelpers.cxx
   ExcelXlsxCore.cxx
   )
@@ -45,6 +49,15 @@ if ( CTRLEXCEL_BUILD_EXTENSION )
 
   # pugixml directly too: ExcelXlsxCore walks the sheet XML (forEachRow)
   target_link_libraries(${TARGET} OpenXLSX::OpenXLSX pugixml::pugixml Threads::Threads)
+
+  if ( NOT WIN32 )
+    # Export only newExternHdl and getVersionString. The CTRL manager loads
+    # extensions into one global symbol namespace, where any other exported
+    # symbol (our classes, or the statically linked OpenXLSX, pugixml and
+    # miniz) can bind to, or be replaced by, a same-named one of WinCC OA.
+    set_target_properties(${TARGET} PROPERTIES CXX_VISIBILITY_PRESET hidden)
+    target_link_options(${TARGET} PRIVATE "LINKER:--exclude-libs,ALL")
+  endif()
 endif()
 
 if ( CTRLEXCEL_BUILD_TESTS )

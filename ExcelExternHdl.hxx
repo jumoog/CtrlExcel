@@ -1,12 +1,15 @@
-#ifndef _EXTERNHDL_H_
-#define _EXTERNHDL_H_
+#ifndef _EXCEL_EXTERN_HDL_HXX_
+#define _EXCEL_EXTERN_HDL_HXX_
 
 #include <BaseExternHdl.hxx>
 
-class ExternHdl : public BaseExternHdl
+// Not "ExternHdl": libCtrlV321 exports a class of that name (the built-in
+// CTRL functions), and on Linux the dynamic linker would bind this class's
+// vtable and typeinfo to WinCC OA's, so none of the functions would exist.
+class ExcelExternHdl : public BaseExternHdl
 {
   public:
-    ExternHdl(BaseExternHdl *nextHdl, PVSSulong funcCount, FunctionListRec fnList[])
+    ExcelExternHdl(BaseExternHdl *nextHdl, PVSSulong funcCount, FunctionListRec fnList[])
       : BaseExternHdl(nextHdl, funcCount, fnList) {}
 
     const Variable *execute(ExecuteParamRec &param) override;

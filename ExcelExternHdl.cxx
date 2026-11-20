@@ -1,4 +1,4 @@
-#include <ExternHdl.hxx>
+#include <ExcelExternHdl.hxx>
 
 #include <ExcelXlsxHelpers.hxx>
 
@@ -48,7 +48,7 @@ static FunctionListRec fnList[] =
   { INTEGER_VAR,       "excelWriteFileAsync",     "(string filename, mapping data, bool &ok)",                                                          false },
 };
 
-CTRL_EXTENSION(ExternHdl, fnList)
+CTRL_EXTENSION(ExcelExternHdl, fnList)
 
 //------------------------------------------------------------------------------
 
@@ -642,7 +642,7 @@ namespace
   class JobWait : public WaitCond
   {
     public:
-      JobWait(std::shared_ptr<Job> job, const ExternHdl &hdl,
+      JobWait(std::shared_ptr<Job> job, const ExcelExternHdl &hdl,
               const BaseExternHdl::ExecuteParamRec &param, CtrlExpr *targetExpr)
         : job_(std::move(job)), hdl_(hdl), param_(param), targetExpr_(targetExpr),
           funcName_(param.funcName.c_str()), started_(std::chrono::steady_clock::now()) { }
@@ -700,7 +700,7 @@ namespace
       // Shared with the worker thread, which may still hold it if the script
       // (and this wait condition) goes away first.
       std::shared_ptr<Job> job_;
-      const ExternHdl &hdl_;
+      const ExcelExternHdl &hdl_;
       BaseExternHdl::ExecuteParamRec param_;
       CtrlExpr *targetExpr_;
       std::string funcName_; // copied: param.funcName does not outlive execute()
@@ -797,7 +797,7 @@ namespace
 
   // Queue the job and suspend the calling script until it is done. False
   // (nothing queued, script not suspended) if no worker thread can run it.
-  bool startJob(const ExternHdl &hdl, const BaseExternHdl::ExecuteParamRec &param,
+  bool startJob(const ExcelExternHdl &hdl, const BaseExternHdl::ExecuteParamRec &param,
                 CtrlExpr *targetExpr, std::shared_ptr<Job> job)
   {
     if ( !WorkerPool::instance().submit(job) )
@@ -810,7 +810,7 @@ namespace
 
 //------------------------------------------------------------------------------
 
-const Variable *ExternHdl::execute(ExecuteParamRec &param)
+const Variable *ExcelExternHdl::execute(ExecuteParamRec &param)
 {
   enum
   {
