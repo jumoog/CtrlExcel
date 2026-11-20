@@ -13,6 +13,9 @@ A WinCC OA CTRL extension (`CtrlExcelReader`) that reads and writes `.xlsx` file
 | `ExcelXlsxCore.cxx/.hxx` | Everything that needs OpenXLSX but not the WinCC OA API: calendar/date conversion, `_xHHHH_` escaping, case folding, sheet-name checks, cell formats, date-format detection, `cellNumber`, `headerText`, `forEachRow` / `forEachCell`, `SheetWriter` |
 | `tests/ExcelXlsxCoreTest.cxx` | C++ tests of `ExcelXlsxCore` (no WinCC OA needed; run in CI) |
 | `ExcelRoundTripTest.ctl` | CTRL round-trip tests (need a WinCC OA project to run) |
+| `scripts/libs/classes/ExcelWorkbook.ctl` | CTRL++ classes `ExcelWorkbook` (file, load/save, messages, call mode) and `ExcelSheet` (rows in memory) on top of the functions |
+| `ExcelWorkbookTest.ctl` | CTRL tests of those classes |
+| `docker/` | Image on top of the WinCC OA image that builds the extension and runs every test suite on Linux (`run-tests.sh`) |
 | `CMakeLists.txt`, `CMakePresets.json`, `vcpkg.json`, `.github/workflows/ci.yml` | Build, CI |
 
 ## Build
@@ -61,6 +64,14 @@ CTRL `time` cannot go below 1970-01-01 UTC (`makeTime` returns time 0, arithmeti
 - Results are returned via function-local `static` variables, reset at the start of each call.
 - **Blocking vs. `...Async`**: all work lives in the operations in `ExcelExternHdl.cxx` (`getSheetNames`, `readSheet`, `readFile`, `writeWorkbook`), which take UTF-8 inputs and collect errors in `Messages` instead of touching the `CtrlThread`. The blocking functions call them inline; the `...Async` variants queue them on the `WorkerPool` (2 to 4 threads, joined at exit) via `startJob`, and a `JobWait` (`WaitCond`) delivers the result into the reference parameter and reports the messages in `checkDone()`, on the CTRL thread. Callers hold the file's `PathLock` (per lexically normalised path; shared for reads, exclusive for writes) because async jobs really run in parallel; it only try-locks: the pool picks the first queued job whose file is free, and blocking calls fail with a "busy" error instead of freezing the manager behind an async job. Operations produce UTF-8 only; the `finish*` / `deliverSheets` steps and `convertRowsToProjectEncoding` convert to the project encoding on the CTRL thread, since WinCC OA's `UTF8Converter` is not known to be thread-safe. Rules: never call `reportError`, `appendLastError`, `resolveTarget`/`getTarget` or `toUtf8`/`fromUtf8`/`isRepresentable` from a worker; clone write inputs before queueing; queue first and only then `setWaitCond` (a failed submit must not leave the script waiting); resolve the target again at delivery instead of keeping the pointer; hand rows over with `moveAllItems` (not a deep copy on the CTRL thread); nothing may throw out of `checkDone`; keep job state in the shared `Job`, since the script (and its `JobWait`) may go away while the worker runs. WinCC OA's `Allocator` falls back to plain `new`/`delete` off the main thread, so building `Variable`s in the worker is safe.
 - Keep `fnList` signatures in sync with the README.
+
+## CTRL++ (`ExcelWorkbook.ctl`)
+
+- WinCC OA 3.21 rejects `const` member functions (the error is reported at the using script's `main`).
+- `vec[i] = ptr` on a `vector<shared_ptr<T>>` copies into the object `vec[i]` points to (every holder of that pointer sees the change); replace an element with `removeAt` + `insertAt`.
+- Mapping key order is unspecified (neither insertion nor sorted order), so never rely on it; `load()` takes the sheet order from `excelGetSheetNames`.
+- Store `getLastError()` in the class right after each extension call; capture `...Async` results in local variables, not members, since the reference argument is evaluated again on delivery.
+- The extension reports errors and warnings alike as `PRIO_WARNING`; the classes decide success by the result (empty read with messages = failure).
 
 ## Style
 

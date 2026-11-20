@@ -168,6 +168,40 @@ The data passed to the write variants is copied when the call starts, so the scr
 
 Async operations run on a small pool of background threads (up to 4 at a time; further calls queue). Operations on the same file are serialised (reads may run together, writes run alone), so parallel scripts never see or produce a half-written file. A blocking function called on a file that an `...Async` call is currently using does not wait (that would freeze the manager): it fails with a "file is busy" error in `getLastError()`. The reference argument is evaluated again when the result arrives, so it may be an element of a shared `dyn` or `mapping`; if that element was removed meanwhile, the result is discarded with an error. Because of this second evaluation, use a plain variable or an index without side effects (not `rows[i++]`, and not an index another script changes while waiting). A call takes at least a few milliseconds more than the blocking variant, since the waiting script is only checked periodically.
 
+### CTRL++ classes (`ExcelWorkbook`, `ExcelSheet`)
+
+`scripts/libs/classes/ExcelWorkbook.ctl` wraps the functions in two classes. Copy it into the project's `scripts/libs/classes/` directory and load it with `#uses "classes/ExcelWorkbook"` (it loads the extension itself).
+
+- **`ExcelWorkbook`** is one `.xlsx` file. `load()` reads all its sheets (in the file's order) and `loadSheet(name)` one sheet into the workbook; `save()` writes the workbook's sheets to the file. `addSheet`, `getSheet`, `hasSheet`, `removeSheet` and `getSheetNames` work on the sheets in memory, `readSheetNames()` lists the sheets in the file. `setReadOptions(skipHiddenRows, firstRowIsColumnNames, skipEmptyRows)` applies to later loads.
+- **`ExcelSheet`** is a named sheet in memory: `rowCount`, `getRow` / `setRow` / `appendRow` / `removeRow`, `getValue(row, column)` / `setValue`, `getColumn(column)`, `getColumnNames()` and `findRows(column, value)`. Row indexes are 1-based, like `dyn` indexes; a missing row or column reads as `""`, like an empty cell.
+- Each file call keeps the messages of `getLastError()`: `getMessages()`, `hasMessages()`, `getMessageText()`. A call that returns `FALSE` (or `nullptr`) failed and its messages are errors; messages of a successful load are warnings, e.g. for dates outside the range of CTRL `time`.
+- The classes call the `...Async` functions, so the other scripts of the manager keep running; `setCallMode(ExcelCallMode::Blocking)` uses the blocking ones instead.
+
+```ctrl
+#uses "classes/ExcelWorkbook"
+
+main()
+{
+  shared_ptr<ExcelWorkbook> book = new ExcelWorkbook("C:/data/report.xlsx");
+  if (!book.load())
+  {
+    DebugTN("load failed", book.getMessageText());
+    return;
+  }
+
+  shared_ptr<ExcelSheet> people = book.getSheet("People");
+  for (int i = 1; i <= people.rowCount(); i++)
+    DebugTN(people.getValue(i, "Name"), people.getValue(i, "Age"));
+
+  shared_ptr<ExcelWorkbook> out = new ExcelWorkbook("C:/data/adults.xlsx");
+  out.addSheet("Adults").setRows(people.findRows("Adult", TRUE));
+  if (!out.save())
+    DebugTN("save failed", out.getMessageText());
+}
+```
+
+Like the functions, `save()` writes columns and sheets in CTRL mapping key order, which is not necessarily the order in which they were added.
+
 ## Error handling
 
 Every function clears and then fills the CTRL error list, so failures can be inspected with `getLastError()`. As for every CTRL function, read it immediately after the call: any other function call in between (even `dynlen`) replaces the list.
@@ -282,11 +316,11 @@ ctrlDLL = "CtrlExcelReader"
   ```
 
   GitHub Actions (`.github/workflows/ci.yml`) runs them on Linux and Windows.
-- **CTRL tests** (`ExcelRoundTripTest.ctl`) test the CTRL functions themselves and need a WinCC OA project with the extension loaded. Copy `testdata/CtrlExcelReaderFixture.xlsx` into the project's `data/` directory for the fixture test.
+- **CTRL tests** (`ExcelRoundTripTest.ctl` for the functions, `ExcelWorkbookTest.ctl` for the CTRL++ classes) need a WinCC OA project with the extension in `bin/` and, for `ExcelWorkbookTest.ctl`, the library in `scripts/libs/classes/`. Copy `testdata/CtrlExcelReaderFixture.xlsx` into the project's `data/` directory for the fixture test.
 
 ### Build and test on Linux in Docker
 
-`docker/` builds the extension against the WinCC OA API on Debian and runs both test suites: the C++ tests and `ExcelRoundTripTest.ctl`, in a throw-away project with a CTRL manager that does not connect to Data/Event (`WCCOActrl -n`), so no database, PMON or license setup is needed.
+`docker/` builds the extension against the WinCC OA API on Debian and runs all tests: the C++ tests, `ExcelRoundTripTest.ctl` and `ExcelWorkbookTest.ctl`, in a throw-away project with a CTRL manager that does not connect to Data/Event (`WCCOActrl -n`), so no database, PMON or license setup is needed.
 
 1. Build the WinCC OA image with the Dockerfile that comes with the WinCC OA Debian packages (it is not part of this repository):
 
@@ -301,7 +335,7 @@ ctrlDLL = "CtrlExcelReader"
    docker run --rm -v "$PWD:/src:ro" -v ctrlexcel-build:/build -v ctrlexcel-vcpkg:/home/winccoa/.cache/vcpkg-archives ctrlexcel-build
    ```
 
-   The volume `ctrlexcel-build` keeps the build (`/build/cmake/CtrlExcelReader.so`) and the CTRL test log (`/build/ctrl-tests.log`); `ctrlexcel-vcpkg` caches the built vcpkg packages. The container exits with 0 only if everything built without warnings and every test passed. On Windows, use `-v "C:/path/to/CtrlExcel:/src:ro"`.
+   The volume `ctrlexcel-build` keeps the build (`/build/cmake/CtrlExcelReader.so`) and the CTRL test logs (`/build/ExcelRoundTripTest.log`, `/build/ExcelWorkbookTest.log`); `ctrlexcel-vcpkg` caches the built vcpkg packages. The container exits with 0 only if everything built without warnings and every test passed. On Windows, use `-v "C:/path/to/CtrlExcel:/src:ro"`.
 
 ## Licenses
 

@@ -38,24 +38,34 @@ proj_version = "3.21"
 langs = "en_US.utf8"
 EOF
 cp "$BUILD/cmake/CtrlExcelReader.so" "$PROJ/bin/"
-cp "$SRC/ExcelRoundTripTest.ctl" "$PROJ/scripts/"
+cp -r "$SRC/scripts/." "$PROJ/scripts/"   # libs/classes/ExcelWorkbook.ctl
+cp "$SRC/ExcelRoundTripTest.ctl" "$SRC/ExcelWorkbookTest.ctl" "$PROJ/scripts/"
 cp "$SRC/testdata/CtrlExcelReaderFixture.xlsx" "$PROJ/data/"
 
-LOG="$BUILD/ctrl-tests.log"
-status=0
-# -autofreg registers the throw-away project on the fly.
-timeout "$CTRL_TIMEOUT" "$OAINST/bin/WCCOActrl" -config "$PROJ/config/config" -autofreg -n \
-  -log +stderr ExcelRoundTripTest.ctl > "$LOG" 2>&1 || status=$?
-cat "$LOG"
+# Runs one CTRL test script; each logs one "<name> summary" line (ALL PASSED
+# or FAILURES), followed by the failed and skipped test names.
+run_ctrl_test()
+{
+  local name=$1
+  local log="$BUILD/$name.log"
+  local status=0
+  echo "--- $name"
+  # -autofreg registers the throw-away project on the fly.
+  timeout "$CTRL_TIMEOUT" "$OAINST/bin/WCCOActrl" -config "$PROJ/config/config" -autofreg -n \
+    -log +stderr "$name.ctl" > "$log" 2>&1 || status=$?
+  cat "$log"
+  if [ "$status" -eq 124 ]; then
+    echo "$name timed out after ${CTRL_TIMEOUT} s" >&2
+    return 1
+  fi
+  if ! grep -q "\"$name summary\"\]\[\"ALL PASSED\"\]" "$log"; then
+    echo "$name failed (WCCOActrl exit code $status), see $log" >&2
+    return 1
+  fi
+}
 
-# The script logs one "ExcelRoundTripTest summary" line (ALL PASSED or
-# FAILURES), followed by the failed and skipped test names.
-if [ "$status" -eq 124 ]; then
-  echo "CTRL tests timed out after ${CTRL_TIMEOUT} s" >&2
-  exit 1
-fi
-if ! grep -q '"ExcelRoundTripTest summary"\]\["ALL PASSED"\]' "$LOG"; then
-  echo "CTRL tests failed (WCCOActrl exit code $status), see $LOG" >&2
-  exit 1
-fi
+failed=0
+run_ctrl_test ExcelRoundTripTest || failed=1
+run_ctrl_test ExcelWorkbookTest || failed=1
+[ "$failed" -eq 0 ] || exit 1
 echo "=== All tests passed"
