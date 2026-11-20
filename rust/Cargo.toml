@@ -16,8 +16,13 @@ calamine = "0.38"
 # the row scan of scan.rs
 memchr = "2"
 quick-xml = "0.42"
-# low-memory worksheets (rows go to a temporary file as they are written)
-rust_xlsxwriter = { version = "0.103", features = ["constant_memory"] }
+# constant_memory: low-memory worksheets (rows go to a temporary file as they
+# are written). zmij: numbers as the shortest text that reads back exactly
+# ("1e-300" rather than 300 digits), about 9% faster writing.
+# enhanced_autofit would need the whole sheet in memory (autofit() only sees
+# the current row of a low-memory sheet); serde and rust_decimal have no use
+# behind the C ABI.
+rust_xlsxwriter = { version = "0.103", features = ["constant_memory", "zmij"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [profile.release]
