@@ -15,6 +15,7 @@
 #include <iostream>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -595,6 +596,125 @@ void implicitReferenceTest()
   doc.close();
 }
 
+void cellReferenceTest()
+{
+  char buf[16];
+  CHECK_EQ(std::string(cellReference(1, 1, buf)), std::string("A1"));
+  CHECK_EQ(std::string(cellReference(7, 26, buf)), std::string("Z7"));
+  CHECK_EQ(std::string(cellReference(7, 27, buf)), std::string("AA7"));
+  CHECK_EQ(std::string(cellReference(12, 702, buf)), std::string("ZZ12"));
+  CHECK_EQ(std::string(cellReference(12, 703, buf)), std::string("AAA12"));
+  CHECK_EQ(std::string(cellReference(1048576, 16384, buf)), std::string("XFD1048576"));
+  for (int c : {1, 2, 25, 26, 27, 52, 53, 701, 702, 703, 16384})
+  {
+    CHECK_EQ(referenceColumn(cellReference(3, static_cast<uint16_t>(c), buf)), static_cast<uint16_t>(c));
+    CHECK_EQ(std::string(cellReference(1048576, static_cast<uint16_t>(c), buf)),
+             XLCellReference(1048576, static_cast<uint16_t>(c)).address());
+  }
+}
+
+// SheetWriter must produce the cells OpenXLSX's own cell.value() = ...
+// produces: same type, value, <v> text and format, with shared strings
+// reused across sheets.
+void sheetWriterTest()
+{
+  TempFile file("writer");
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const double inf = std::numeric_limits<double>::infinity();
+  {
+    XLDocument doc;
+    doc.create(file.name(), XLForceOverwrite);
+    XLStyleIndex dateTime = createDateTimeFormat(doc);
+    auto api = doc.workbook().worksheet(1);
+    doc.workbook().addWorksheet("Writer");
+    auto written = doc.workbook().worksheet("Writer");
+
+    // Row 1: integers, row 2: floats, row 3: booleans and texts.
+    const int64_t ints[] = {0, -5, 2147483648LL, std::numeric_limits<int64_t>::max()};
+    const double floats[] = {0.1, 123.0, 1e20, -2.5e-300, nan, inf};
+    const char *texts[] = {"a", "", " lead", "a", "Ã¤â¬"};
+
+    for (uint16_t c = 0; c < 4; ++c)
+      api.cell(1, static_cast<uint16_t>(c + 1)).value() = ints[c];
+    for (uint16_t c = 0; c < 6; ++c)
+      api.cell(2, static_cast<uint16_t>(c + 1)).value() = floats[c];
+    api.cell(3, 1).value() = true;
+    api.cell(3, 2).value() = false;
+    for (uint16_t c = 0; c < 5; ++c)
+      api.cell(3, static_cast<uint16_t>(c + 3)).value() = std::string(texts[c]);
+    api.cell(4, 2).value() = XLDateTime(46023.5);
+    api.cell(4, 2).setCellFormat(dateTime);
+
+    SharedStringIndex strings(doc.sharedStrings());
+    SheetWriter out(written, strings);
+    out.beginRow(1);
+    for (uint16_t c = 0; c < 4; ++c)
+      out.integer(static_cast<uint16_t>(c + 1), ints[c]);
+    out.beginRow(2);
+    for (uint16_t c = 0; c < 6; ++c)
+      out.number(static_cast<uint16_t>(c + 1), floats[c]);
+    out.beginRow(3);
+    out.boolean(1, true);
+    out.boolean(2, false);
+    for (uint16_t c = 0; c < 5; ++c)
+      out.text(static_cast<uint16_t>(c + 3), texts[c]);
+    out.beginRow(4);
+    out.number(2, 46023.5, dateTime);
+
+    bool threw = false;
+    try { out.beginRow(4); } catch (const std::invalid_argument &) { threw = true; }
+    CHECK(threw); // rows must ascend
+    threw = false;
+    try { out.number(2, 1.0); } catch (const std::invalid_argument &) { threw = true; }
+    CHECK(threw); // columns must ascend
+    threw = false;
+    try { SheetWriter again(written, strings); again.beginRow(4); } catch (const std::invalid_argument &) { threw = true; }
+    CHECK(threw); // a new writer starts after the existing rows
+
+    // Five texts, four distinct ones, all already written on the API sheet.
+    CHECK_EQ(doc.sharedStrings().stringCount(), int32_t(4));
+
+    // Writers sharing one index see each other's new strings.
+    doc.workbook().addWorksheet("Second");
+    doc.workbook().addWorksheet("Third");
+    auto second = doc.workbook().worksheet("Second");
+    auto third = doc.workbook().worksheet("Third");
+    SheetWriter w2(second, strings);
+    SheetWriter w3(third, strings);
+    w2.beginRow(1);
+    w3.beginRow(1);
+    w2.text(1, "new");
+    w3.text(1, "new");
+    CHECK_EQ(doc.sharedStrings().stringCount(), int32_t(5));
+    CHECK_EQ(strings.indexOf("new"), doc.sharedStrings().getStringIndex("new"));
+    CHECK_EQ(strings.indexOf("a"), doc.sharedStrings().getStringIndex("a"));
+    doc.save();
+    doc.close();
+  }
+
+  XLDocument doc;
+  doc.open(file.name());
+  auto api = doc.workbook().worksheet(1);
+  auto written = doc.workbook().worksheet("Writer");
+  for (const char *ref : {"A1", "B1", "C1", "D1", "A2", "B2", "C2", "D2", "E2", "F2",
+                          "A3", "B3", "C3", "D3", "E3", "F3", "G3", "A4", "B4"})
+  {
+    XLCell expected = api.findCell(ref);
+    XLCell actual = written.findCell(ref);
+    CHECK_EQ(bool(actual), bool(expected));
+    if (!expected || !actual)
+      continue;
+    CHECK(actual.value().type() == expected.value().type());
+    CHECK_EQ(actual.value().getString(), expected.value().getString());
+    CHECK_EQ(rawNumberText(actual), rawNumberText(expected));
+    CHECK_EQ(actual.cellFormat(), expected.cellFormat());
+  }
+  CHECK_EQ(written.findCell("G3").value().get<std::string>(), std::string("Ã¤â¬"));
+  CHECK_EQ(written.findCell("E2").value().getString(), std::string("#NUM!"));
+  CHECK_EQ(written.findCell("D1").value().get<int64_t>(), std::numeric_limits<int64_t>::max());
+  doc.close();
+}
+
 // Cells from testdata/CtrlExcelReaderFixture.xlsx (written like Excel does,
 // see testdata/make_fixture.py), column B.
 void fixtureTest()
@@ -729,6 +849,8 @@ int main(int argc, char *argv[])
     {"referenceColumnTest", referenceColumnTest},
     {"sparseSheetTest", sparseSheetTest},
     {"implicitReferenceTest", implicitReferenceTest},
+    {"cellReferenceTest", cellReferenceTest},
+    {"sheetWriterTest", sheetWriterTest},
     {"fixtureTest", fixtureTest},
   };
 

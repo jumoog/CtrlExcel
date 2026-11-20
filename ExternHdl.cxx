@@ -415,6 +415,8 @@ namespace
       doc.setProperty(XLProperty::LastModifiedBy, "WinCC OA");
 
       auto wb = doc.workbook();
+      // One index of the shared strings for all sheets (see SheetWriter).
+      ExcelXlsxCore::SharedStringIndex strings(doc.sharedStrings());
       for ( size_t s = 0; s < sheets.size(); s++ )
       {
         const std::string &sheetName = names[s];
@@ -425,7 +427,7 @@ namespace
 
         auto wks = wb.worksheet(sheetName);
         std::string error;
-        if ( !ExcelXlsxHelpers::writeSheetData(wks, *sheetRows[s], doc, error) )
+        if ( !ExcelXlsxHelpers::writeSheetData(wks, *sheetRows[s], doc, strings, error) )
         {
           msgs.add(sheetName + ": " + error);
           return false;

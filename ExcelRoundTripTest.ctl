@@ -28,6 +28,7 @@ int g_concurrentDone;
 dyn_string g_concurrentFailures;
 
 // excelBusyFileTest / excelAsyncStopWhileWaitingTest: set by helper threads.
+bool g_busyWriterStarted;
 bool g_busyWriterDone;
 bool g_stoppedReaderStarted;
 bool g_stoppedReaderResumed;
@@ -849,7 +850,7 @@ bool excelAsyncDoesNotBlockTest()
 
   const int ROWS = 100000;
 
-  if (!excelWriteSheet(filename, "Big", slowReadRows(ROWS)))
+  if (!excelWriteSheet(filename, "Big", bigRows(ROWS)))
   {
     DebugTN("excelAsyncDoesNotBlockTest: excelWriteSheet failed", getLastError());
     remove(filename);
@@ -950,7 +951,8 @@ bool excelAsyncConcurrencyTest()
   return pass;
 }
 
-// n rows of four columns, large enough that reading or writing takes a while.
+// n rows of four columns, for tests that need reading or writing to take a
+// while (100000 rows: a few hundred ms each).
 dyn_anytype bigRows(int n)
 {
   dyn_anytype rows;
@@ -963,24 +965,10 @@ dyn_anytype bigRows(int n)
   return rows;
 }
 
-// n rows for tests that need a read to take a while (100000 rows: a few
-// hundred ms). One repeated text: OpenXLSX's write searches all earlier
-// strings for every text cell, so unique texts would make writing slow.
-dyn_anytype slowReadRows(int n)
-{
-  dyn_anytype rows;
-
-  for (int i = 1; i <= n; i++)
-  {
-    dynAppend(rows, makeMapping("Id", i, "Name", "row", "Value", i * 1.5, "Flag", i % 2 == 0));
-  }
-
-  return rows;
-}
-
 void busyWriter(string filename, dyn_anytype rows)
 {
   bool ok;
+  g_busyWriterStarted = TRUE;
   excelWriteSheetAsync(filename, "Big", rows, ok);
   g_busyWriterDone = TRUE;
 }
@@ -996,9 +984,19 @@ bool excelBusyFileTest()
   // Seed the file, so a read that does not see the lock would succeed.
   excelWriteSheet(filename, "Big", bigRows(10));
 
+  g_busyWriterStarted = FALSE;
   g_busyWriterDone = FALSE;
-  startThread("busyWriter", filename, bigRows(20000));
-  delay(0, 200); // the worker has taken the file by now
+  startThread("busyWriter", filename, bigRows(100000));
+  time startDeadline = getCurrentTime() + 10;
+
+  while (!g_busyWriterStarted && getCurrentTime() < startDeadline)
+  {
+    delay(0, 1);
+  }
+
+  // The flag is set just before excelWriteSheetAsync, which copies the
+  // rows, queues the job and waits; the worker has taken the file by now.
+  delay(0, 100);
 
   dyn_mapping rows = excelReadSheet(filename, "Big");
   dyn_errClass errors = getLastError();
@@ -1042,7 +1040,7 @@ bool excelAsyncStopWhileWaitingTest()
 
   if (filename == "") return FALSE;
 
-  if (!excelWriteSheet(filename, "Big", slowReadRows(ROWS)))
+  if (!excelWriteSheet(filename, "Big", bigRows(ROWS)))
   {
     DebugTN("excelAsyncStopWhileWaitingTest: excelWriteSheet failed", getLastError());
     remove(filename);

@@ -182,17 +182,17 @@ namespace
       : nullptr;
   }
 
-  // Write a single WinCC OA Variable to an OpenXLSX cell. width receives the
-  // displayed length for column sizing. False with a reason in problem if the
-  // value cannot be stored in Excel.
-  bool writeTypedCell(XLCell &cell, const Variable *val,
+  // Write a single WinCC OA Variable to a cell of the current row. width
+  // receives the displayed length for column sizing. False with a reason in
+  // problem if the value cannot be stored in Excel.
+  bool writeTypedCell(SheetWriter &out, uint16_t column, const Variable *val,
                       XLStyleIndex dateTimeFmtIdx, size_t &width,
                       std::string &problem)
   {
     width = 0;
     if (!val)
     {
-      cell.value() = std::string();
+      out.text(column, std::string());
       return true;
     }
 
@@ -204,19 +204,19 @@ namespace
         int64_t v = (val->isA() == INTEGER_VAR)
           ? static_cast<int64_t>(static_cast<const IntegerVar *>(val)->getValue())
           : static_cast<int64_t>(static_cast<const LongVar *>(val)->getValue());
-        cell.value() = v;
+        out.integer(column, v);
         width = numberWidth(static_cast<double>(v));
         return true;
       }
       case FLOAT_VAR:
       {
         double v = static_cast<const FloatVar *>(val)->getValue();
-        cell.value() = v;
+        out.number(column, v);
         width = numberWidth(v);
         return true;
       }
       case BIT_VAR:
-        cell.value() = static_cast<const BitVar *>(val)->isTrue();
+        out.boolean(column, static_cast<const BitVar *>(val)->isTrue());
         width = 5; // "FALSE"
         return true;
       case TIME_VAR:
@@ -229,8 +229,7 @@ namespace
           problem = "time cannot be converted to local time";
           return false;
         }
-        cell.value() = XLDateTime(serial);
-        cell.setCellFormat(dateTimeFmtIdx);
+        out.number(column, serial, dateTimeFmtIdx);
         width = 19; // "YYYY-MM-DD hh:mm:ss"
         return true;
       }
@@ -242,7 +241,7 @@ namespace
           problem = "text exceeds " + std::to_string(EXCEL_MAX_CELL_CHARS) + " characters";
           return false;
         }
-        cell.value() = text;
+        out.text(column, text);
         return true;
       }
       case ANYTYPE_VAR:
@@ -251,11 +250,11 @@ namespace
         const Variable *inner = ExcelXlsxHelpers::unwrapAnyOrMixed(val);
         if (!inner)
         {
-          cell.value() = std::string();
+          out.text(column, std::string());
           return true;
         }
 
-        return writeTypedCell(cell, inner, dateTimeFmtIdx, width, problem);
+        return writeTypedCell(out, column, inner, dateTimeFmtIdx, width, problem);
       }
       default:
       {
@@ -266,7 +265,7 @@ namespace
           problem = "text exceeds " + std::to_string(EXCEL_MAX_CELL_CHARS) + " characters";
           return false;
         }
-        cell.value() = text;
+        out.text(column, text);
         return true;
       }
     }
@@ -387,7 +386,7 @@ namespace ExcelXlsxHelpers
   // keys of all rows in order of first appearance; row 1 holds them as bold
   // headers.
   bool writeSheetData(XLWorksheet &wks, const DynVar &data, XLDocument &doc,
-                      std::string &error)
+                      SharedStringIndex &strings, std::string &error)
   {
     unsigned int numRows = data.getNumberOfItems();
     if (numRows == 0)
@@ -456,7 +455,12 @@ namespace ExcelXlsxHelpers
     std::vector<size_t> maxWidths(numCols);
     std::vector<std::string> headerNames(numCols);
 
+    // Cells go straight into the sheet XML (see SheetWriter): wks.cell()
+    // with OpenXLSX's shared-string search made writing quadratic.
+    SheetWriter out(wks, strings);
+
     // Write column headers in row 1 (bold)
+    out.beginRow(1);
     for (size_t c = 0; c < numCols; c++)
     {
       CharString name = keys[c]->formatValue(CharString());
@@ -468,25 +472,19 @@ namespace ExcelXlsxHelpers
         return false;
       }
 
-      auto cell = wks.cell(1, static_cast<uint16_t>(c + 1));
-      cell.value() = text;
-      cell.setCellFormat(boldFmtIdx);
+      out.text(static_cast<uint16_t>(c + 1), text, boldFmtIdx);
     }
 
     // Write data rows starting from row 2
     for (unsigned int r = 0; r < numRows; r++)
     {
+      out.beginRow(static_cast<uint32_t>(r + 2));
       for (size_t c = 0; c < numCols; c++)
       {
         const Variable *cellVal = rows[r]->getAt(*keys[c]);
-        auto cell = wks.cell(
-          static_cast<uint32_t>(r + 2),
-          static_cast<uint16_t>(c + 1)
-        );
-
         size_t width = 0;
         std::string problem;
-        if (!writeTypedCell(cell, cellVal, dateTimeFmtIdx, width, problem))
+        if (!writeTypedCell(out, static_cast<uint16_t>(c + 1), cellVal, dateTimeFmtIdx, width, problem))
         {
           error = "row " + std::to_string(r + 1) + ", column '"
                 + headerNames[c] + "': " + problem;

@@ -41,8 +41,10 @@ namespace ExcelXlsxHelpers
 
   // Returns false with a reason in error if a row is not a mapping, the data
   // exceeds Excel's sheet size, or a text exceeds Excel's cell limit.
+  // strings indexes doc's shared strings; use one for all sheets of doc.
   bool writeSheetData(OpenXLSX::XLWorksheet &wks, const DynVar &data,
-                      OpenXLSX::XLDocument &doc, std::string &error);
+                      OpenXLSX::XLDocument &doc, ExcelXlsxCore::SharedStringIndex &strings,
+                      std::string &error);
 }
 
 #endif

@@ -184,7 +184,9 @@ if (dynlen(err) > 0)
 
 ## Performance
 
-Reading now goes through the sheet once instead of looking up every row from the start or end of the sheet, so the read time grows linearly with the sheet size instead of quadratically. Large sheets read up to 130 times faster:
+Reading and writing now take time in proportion to the sheet size; before, both slowed down quadratically on large sheets. Reading went through the sheet once per row instead of once in total, and writing compared every text with all texts written before it.
+
+Reading is up to 130 times faster:
 
 | Sheet (rows × columns) | Before | Now | Speed-up |
 |---|---:|---:|---:|
@@ -193,9 +195,15 @@ Reading now goes through the sheet once instead of looking up every row from the
 | 100,000 × 10 | 75 s | 0.58 s | 130× |
 | 2,000 × 500 | 0.51 s | 0.34 s | 1.5× |
 
-Measured on Windows 11 with a Release build of the extension's read path in a standalone benchmark (mixed integers, floats, texts, dates and booleans), without the conversion into CTRL variables. Inside a CTRL manager, `excelReadSheet` on 100,000 rows × 4 columns takes about 0.3 s.
+Writing is up to 13 times faster (the cells written are the same as before):
 
-Writing is unchanged: OpenXLSX compares every text with all texts written before it, so writing many *distinct* texts slows down as the sheet grows (100,000 rows with a unique text per row: about 20 s). Numbers, dates, booleans and repeated texts are not affected.
+| Sheet (rows × columns) | Before | Now | Speed-up |
+|---|---:|---:|---:|
+| 10,000 × 10 | 0.30 s | 0.17 s | 1.8× |
+| 50,000 × 10 | 4.4 s | 0.81 s | 5× |
+| 100,000 × 10 | 20.6 s | 1.63 s | 13× |
+
+Measured on Windows 11 with a Release build of the extension's read and write paths in a standalone benchmark (mixed integers, floats, texts, dates and booleans, one distinct text per row), without the conversion from and into CTRL variables. Inside a CTRL manager, `excelReadSheet` on 100,000 rows × 4 columns takes about 0.3 s.
 
 ## Build
 

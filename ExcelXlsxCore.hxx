@@ -280,6 +280,60 @@ namespace ExcelXlsxCore
   };
   SheetExtent sheetExtent(OpenXLSX::XLWorksheet &wks);
 
+  // Writes cell reference "A1".."XFD1048576" of (row, column) into buf and
+  // returns it.
+  const char *cellReference(uint32_t row, uint16_t column, char (&buf)[16]);
+
+  // Hash index of a workbook's shared strings, for SheetWriter. OpenXLSX
+  // finds a string by searching the whole table linearly. One index serves
+  // all sheets of a workbook: strings appended through it are known to every
+  // writer, and the table is indexed once rather than once per sheet. Do not
+  // append strings to the table other than through the index while it lives.
+  class SharedStringIndex
+  {
+  public:
+    explicit SharedStringIndex(const OpenXLSX::XLSharedStrings &strings);
+
+    // Index of text in the table, appended if it is new.
+    int32_t indexOf(const std::string &text);
+
+  private:
+    const OpenXLSX::XLSharedStrings &m_strings;
+    std::unordered_map<std::string, int32_t> m_index;
+  };
+
+  // Appends rows and cells to a worksheet's XML directly, with the cell XML
+  // that OpenXLSX's cell.value() = ... produces (same types, values and
+  // formats; attributes may come in another order). Writing through OpenXLSX
+  // is quadratic: every text cell searches all shared strings linearly
+  // (twice: stringExists, then getStringIndex), so 100000 rows with a
+  // distinct text each took 20 s; SharedStringIndex finds them by hash.
+  // Rows and, within a row, columns must ascend, and each row must lie after
+  // every row the sheet already has; violations throw std::invalid_argument.
+  // Texts are written as they are: pass them through toXmlUtf8 first.
+  class SheetWriter
+  {
+  public:
+    SheetWriter(OpenXLSX::XLWorksheet &wks, SharedStringIndex &strings);
+
+    void beginRow(uint32_t row);
+
+    void integer(uint16_t column, int64_t value, OpenXLSX::XLStyleIndex style = OpenXLSX::XLDefaultCellFormat);
+    // Non-finite values become the error #NUM!, as in OpenXLSX.
+    void number(uint16_t column, double value, OpenXLSX::XLStyleIndex style = OpenXLSX::XLDefaultCellFormat);
+    void boolean(uint16_t column, bool value, OpenXLSX::XLStyleIndex style = OpenXLSX::XLDefaultCellFormat);
+    void text(uint16_t column, const std::string &utf8, OpenXLSX::XLStyleIndex style = OpenXLSX::XLDefaultCellFormat);
+
+  private:
+    OpenXLSX::XMLNode appendCell(uint16_t column, OpenXLSX::XLStyleIndex style);
+
+    OpenXLSX::XMLNode m_sheetData;
+    OpenXLSX::XMLNode m_row;
+    uint32_t m_rowNumber = 0;
+    uint16_t m_column = 0; // last column written in m_row
+    SharedStringIndex &m_strings;
+  };
+
   // names are UTF-8; converts them to valid UTF-8 in place. Returns an empty
   // string if Excel accepts every name, otherwise the first problem found.
   std::string checkSheetNames(std::vector<std::string> &names);

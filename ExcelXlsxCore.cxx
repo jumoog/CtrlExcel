@@ -8,6 +8,7 @@
 #include <cstring>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 #include <unordered_set>
 
 using namespace OpenXLSX;
@@ -116,6 +117,109 @@ namespace ExcelXlsxCore
       });
     });
     return extent;
+  }
+
+  const char *cellReference(uint32_t row, uint16_t column, char (&buf)[16])
+  {
+    char letters[4];
+    int n = 0;
+    for (unsigned c = column; c > 0 && n < 3; c = (c - 1) / 26)
+      letters[n++] = static_cast<char>('A' + (c - 1) % 26);
+    int pos = 0;
+    while (n > 0)
+      buf[pos++] = letters[--n];
+    snprintf(buf + pos, sizeof(buf) - static_cast<size_t>(pos), "%u", static_cast<unsigned>(row));
+    return buf;
+  }
+
+  SharedStringIndex::SharedStringIndex(const XLSharedStrings &strings)
+    : m_strings(strings)
+  {
+    // emplace keeps the first index of a duplicate, as getStringIndex does.
+    const int32_t count = m_strings.stringCount();
+    m_index.reserve(static_cast<size_t>(count));
+    for (int32_t i = 0; i < count; ++i)
+      m_index.emplace(m_strings.getString(i), i);
+  }
+
+  int32_t SharedStringIndex::indexOf(const std::string &text)
+  {
+    auto known = m_index.find(text);
+    if (known != m_index.end())
+      return known->second;
+    const int32_t index = m_strings.appendString(text);
+    m_index.emplace(text, index);
+    return index;
+  }
+
+  SheetWriter::SheetWriter(XLWorksheet &wks, SharedStringIndex &strings)
+    : m_sheetData(sheetDataNode(wks)),
+      m_rowNumber(sheetExtent(wks).rows),
+      m_strings(strings)
+  {
+  }
+
+  void SheetWriter::beginRow(uint32_t row)
+  {
+    if (row == 0 || row > MAX_ROWS || row <= m_rowNumber)
+      throw std::invalid_argument("SheetWriter: row " + std::to_string(row) + " does not follow row "
+                                  + std::to_string(m_rowNumber));
+    m_row = m_sheetData.append_child("row");
+    m_row.append_attribute("r").set_value(row);
+    m_rowNumber = row;
+    m_column = 0;
+  }
+
+  XMLNode SheetWriter::appendCell(uint16_t column, XLStyleIndex style)
+  {
+    if (m_row.empty())
+      throw std::invalid_argument("SheetWriter: no row begun");
+    if (column == 0 || column > MAX_COLS || column <= m_column)
+      throw std::invalid_argument("SheetWriter: column " + std::to_string(column) + " does not follow column "
+                                  + std::to_string(m_column));
+    m_column = column;
+
+    char ref[16];
+    XMLNode cell = m_row.append_child("c");
+    cell.append_attribute("r").set_value(cellReference(m_rowNumber, column, ref));
+    if (style != XLDefaultCellFormat)
+      cell.append_attribute("s").set_value(style);
+    return cell;
+  }
+
+  // The values are set with the same pugixml calls as OpenXLSX's
+  // XLCellValueProxy::setInteger / setFloat / setBoolean / setString /
+  // setError, so the text in the file (e.g. %.17g for doubles) is identical.
+  void SheetWriter::integer(uint16_t column, int64_t value, XLStyleIndex style)
+  {
+    appendCell(column, style).append_child("v").text().set(value);
+  }
+
+  void SheetWriter::number(uint16_t column, double value, XLStyleIndex style)
+  {
+    XMLNode cell = appendCell(column, style);
+    if (std::isfinite(value))
+    {
+      cell.append_child("v").text().set(value);
+      return;
+    }
+    cell.append_attribute("t").set_value("e");
+    cell.append_child("v").text().set("#NUM!");
+  }
+
+  void SheetWriter::boolean(uint16_t column, bool value, XLStyleIndex style)
+  {
+    XMLNode cell = appendCell(column, style);
+    cell.append_attribute("t").set_value("b");
+    cell.append_child("v").text().set(value ? 1 : 0);
+  }
+
+  void SheetWriter::text(uint16_t column, const std::string &utf8, XLStyleIndex style)
+  {
+    XMLNode cell = appendCell(column, style);
+    const int32_t index = m_strings.indexOf(utf8);
+    cell.append_attribute("t").set_value("s");
+    cell.append_child("v").text().set(index);
   }
 
   long long daysFromCivil(long long y, unsigned m, unsigned d)
