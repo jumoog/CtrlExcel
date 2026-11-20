@@ -6,6 +6,8 @@
 #include <FloatVar.hxx>
 #include <IntegerVar.hxx>
 #include <LongVar.hxx>
+#include <UIntegerVar.hxx>
+#include <ULongVar.hxx>
 #include <MappingVar.hxx>
 #include <MixedVar.hxx>
 #include <TextVar.hxx>
@@ -343,6 +345,18 @@ namespace
         int64_t v = (val->isA() == INTEGER_VAR)
           ? static_cast<int64_t>(static_cast<const IntegerVar *>(val)->getValue())
           : static_cast<int64_t>(static_cast<const LongVar *>(val)->getValue());
+        out.number(row, column, static_cast<double>(v));
+        width = numberWidth(static_cast<double>(v));
+        return true;
+      }
+      case UINTEGER_VAR:
+      case ULONG_VAR:
+      {
+        // As numbers, like int and long (formatValue would make them texts).
+        // Read back they are int, long or (beyond 2^63) float.
+        uint64_t v = (val->isA() == UINTEGER_VAR)
+          ? static_cast<uint64_t>(static_cast<const UIntegerVar *>(val)->getValue())
+          : static_cast<uint64_t>(static_cast<const ULongVar *>(val)->getValue());
         out.number(row, column, static_cast<double>(v));
         width = numberWidth(static_cast<double>(v));
         return true;

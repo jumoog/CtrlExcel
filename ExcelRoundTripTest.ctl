@@ -44,6 +44,7 @@ void main()
   recordTest("excelFailedWriteKeepsFileTest", excelFailedWriteKeepsFileTest());
   recordTest("excelReadErrorReportedTest", excelReadErrorReportedTest());
   recordTest("excelLongValueTest", excelLongValueTest());
+  recordTest("excelUnsignedValueTest", excelUnsignedValueTest());
   recordTest("excelEmptyHeaderTest", excelEmptyHeaderTest());
   recordTest("excelSheetNameValidationTest", excelSheetNameValidationTest());
   recordTest("excelControlCharsTest", excelControlCharsTest());
@@ -372,6 +373,34 @@ bool excelLongValueTest(string filename = "")
 
   DebugTN("excelLongValueTest", "file", filename, "pass", pass);
   remove(filename);
+  return pass;
+}
+
+// uint and ulong are written as numbers (not as texts) and come back as int
+// and, beyond 32 bits, long.
+bool excelUnsignedValueTest()
+{
+  uint small = 5;
+  ulong big = 60000;
+  big = big * 100000; // 6000000000, beyond the 32-bit range
+
+  dyn_mapping back;
+  bool written = writeAndReadBack("excelUnsignedValueTest",
+                                  makeDynAnytype(makeMapping("Small", small, "Big", big)), back);
+
+  bool pass = written
+              && dynlen(back) == 1
+              && getType(back[1]["Small"]) == INT_VAR
+              && back[1]["Small"] == 5
+              && getType(back[1]["Big"]) == LONG_VAR
+              && back[1]["Big"] == big;
+
+  if (!pass)
+  {
+    DebugTN("excelUnsignedValueTest: value mismatch — read-back data", back);
+  }
+
+  DebugTN("excelUnsignedValueTest", "pass", pass);
   return pass;
 }
 
