@@ -283,7 +283,7 @@ Copy the built library into your WinCC OA project's `bin/` directory:
 - Windows: `build/RelWithDebInfo/CtrlExcelReader.dll` (or `build/Debug/...`)
 - Linux: `build-linux-relwithdebinfo/CtrlExcelReader.so` (or `build-linux-debug/...`)
 
-On Windows, the DLL's version information (Properties > Details, or `(Get-Item CtrlExcelReader.dll).VersionInfo`) shows the version and, as `ProductVersion` (e.g. `1.0.0+a5f43da`), the commit it was built from, so you can tell which build a project uses.
+On Windows, the DLL's version information (Properties > Details, or `(Get-Item CtrlExcelReader.dll).VersionInfo`) shows the version and, as `ProductVersion` (e.g. `2.0.0+a5f43da`), the commit it was built from, so you can tell which build a project uses.
 
 Load the extension in every script that uses it (recommended by WinCC OA):
 

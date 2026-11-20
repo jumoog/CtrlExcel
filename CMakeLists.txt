@@ -21,7 +21,7 @@ else()
 endif()
 
 # The version of the extension (the version resource takes it from here).
-project(CtrlExcelReader VERSION 1.0.0)
+project(CtrlExcelReader VERSION 2.0.0)
 
 # --- xlsx library: calamine (read) and rust_xlsxwriter (write), in rust/ ------
 include(${PROJECT_SOURCE_DIR}/cmake/RustLibrary.cmake)

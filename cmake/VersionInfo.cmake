@@ -13,12 +13,14 @@ list(GET parts 0 major)
 list(GET parts 1 minor)
 list(GET parts 2 patch)
 
-# "a5f43da", "a5f43da-dirty" with uncommitted changes, "v1.0.0-3-ga5f43da"
-# after a tag; "unknown" without git (e.g. a source archive).
+# The commit: "a5f43da", "a5f43da-dirty" with uncommitted changes; "unknown"
+# without git (e.g. a source archive). Tags are excluded: the version comes
+# from CMakeLists.txt, and a release tag would turn "2.0.0+a5f43da" into
+# "2.0.0+v2.0.0".
 set(revision "unknown")
 if ( GIT_EXECUTABLE )
   execute_process(
-    COMMAND "${GIT_EXECUTABLE}" -C "${SOURCE_DIR}" describe --always --dirty --abbrev=7
+    COMMAND "${GIT_EXECUTABLE}" -C "${SOURCE_DIR}" describe --always --dirty --abbrev=7 --exclude=*
     OUTPUT_VARIABLE described
     OUTPUT_STRIP_TRAILING_WHITESPACE
     RESULT_VARIABLE result
