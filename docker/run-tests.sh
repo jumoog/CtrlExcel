@@ -13,6 +13,13 @@ SRC=${SRC:-/src}
 BUILD=${BUILD:-/build}
 OAINST=${OAINST:-/opt/WinCC_OA/3.21}
 CTRL_TIMEOUT=${CTRL_TIMEOUT:-600}
+# Cross-compiling (set by docker/winccoa-debian-arm64-cross): the Rust target,
+# the toolchain file in $SRC/cmake and the emulator for WCCOActrl; cargo test
+# and ctest run their tests through the emulator, too
+# (CARGO_TARGET_<triple>_RUNNER, CMAKE_CROSSCOMPILING_EMULATOR).
+RUST_TARGET=${CTRLEXCEL_RUST_TARGET:-}
+TOOLCHAIN=${CTRLEXCEL_TOOLCHAIN:+$SRC/cmake/$CTRLEXCEL_TOOLCHAIN}
+CTRL_RUNNER=${CTRLEXCEL_CTRL_RUNNER:-}
 
 if [ "${WARNINGS_AS_ERRORS:-ON}" = ON ]; then
   export RUSTFLAGS="${RUSTFLAGS:-} -D warnings"
@@ -21,15 +28,19 @@ fi
 echo "=== Rust toolchain"
 # The one pinned in rust/rust-toolchain.toml; kept in ~/.rustup (a volume).
 (cd "$SRC/rust" && rustup toolchain install && cargo --version)
+if [ -n "$RUST_TARGET" ]; then
+  (cd "$SRC/rust" && rustup target add "$RUST_TARGET")
+fi
 
 echo "=== Rust tests"
 # /src is read-only: cargo writes its target directory to /build.
-(cd "$SRC/rust" && CARGO_TARGET_DIR="$BUILD/cargo-test" cargo test --locked)
+(cd "$SRC/rust" && CARGO_TARGET_DIR="$BUILD/cargo-test" cargo test --locked ${RUST_TARGET:+--target "$RUST_TARGET"})
 
 echo "=== Configure"
 # --fresh: a cache from an older build setup must not carry over.
 cmake --fresh -S "$SRC" -B "$BUILD/cmake" -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  ${TOOLCHAIN:+-DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" -DCTRLEXCEL_RUST_TARGET="$RUST_TARGET"} \
   -DCMAKE_COMPILE_WARNING_AS_ERROR="${WARNINGS_AS_ERRORS:-ON}"
 
 echo "=== Build"
@@ -63,7 +74,7 @@ run_ctrl_test()
   local status=0
   echo "--- $name"
   # -autofreg registers the throw-away project on the fly.
-  timeout "$CTRL_TIMEOUT" "$OAINST/bin/WCCOActrl" -config "$PROJ/config/config" -autofreg -n \
+  timeout "$CTRL_TIMEOUT" $CTRL_RUNNER "$OAINST/bin/WCCOActrl" -config "$PROJ/config/config" -autofreg -n \
     -log +stderr "$name.ctl" > "$log" 2>&1 || status=$?
   cat "$log"
   if [ "$status" -eq 124 ]; then

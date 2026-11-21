@@ -340,7 +340,17 @@ docker build -t ctrlexcel-build-rhel --build-arg BASE_IMAGE=winccoa321-rhel:3.21
 docker run --rm -v "$PWD:/src:ro" -v ctrlexcel-build-rhel:/build -v ctrlexcel-cargo:/home/winccoa/.cargo/registry -v ctrlexcel-rustup:/home/winccoa/.rustup ctrlexcel-build-rhel
 ```
 
-The Debian build needs glibc 2.34 and the RHEL build glibc 2.39 (RHEL 10); use the one built for the distribution the project runs on.
+For **Debian 12 on arm64** (e.g. a Raspberry Pi or an industrial edge device), `docker/winccoa-debian-arm64-cross/Dockerfile` cross-compiles on an x86_64 host: an x86_64 Debian 12 image with Debian's arm64 cross compiler, the unpacked arm64 WinCC OA packages (CodeMeter, Base, BaseServer, APIcpp) and qemu-user, which runs the arm64 Rust, C++ and CTRL tests on the build host (no binfmt setup or arm64 Docker host needed; the CTRL tests take a few times longer under emulation). The build-and-test image is again the same:
+
+```sh
+docker build -t winccoa321-arm64-cross:3.21.7 -f docker/winccoa-debian-arm64-cross/Dockerfile path/to/WinCCOA-3.21.7-debian.arm64v8
+docker build -t ctrlexcel-build-arm64 --build-arg BASE_IMAGE=winccoa321-arm64-cross:3.21.7 docker
+docker run --rm -v "$PWD:/src:ro" -v ctrlexcel-build-arm64:/build -v ctrlexcel-cargo:/home/winccoa/.cargo/registry -v ctrlexcel-rustup:/home/winccoa/.rustup ctrlexcel-build-arm64
+```
+
+The arm64 `CtrlExcelReader.so` is in the volume at `/build/cmake/`. On an arm64 host, skip the cross image: build Siemens' Dockerfile from the arm64 package directory natively and the build-and-test image on top, as for x86_64. Outside Docker, `cmake/toolchain-aarch64-linux-gnu.cmake` cross-compiles with `g++-aarch64-linux-gnu` (`rustup target add aarch64-unknown-linux-gnu` first, and `API_ROOT` pointing to the arm64 API with the arm64 Base libraries in `api/../bin`).
+
+The Debian builds (x86_64 and arm64) need glibc 2.34 and the RHEL build glibc 2.39 (RHEL 10); use the one built for the distribution and architecture the project runs on.
 
 ## Licenses
 

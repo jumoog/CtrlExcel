@@ -12,19 +12,34 @@ if ( NOT CARGO_EXECUTABLE )
   message(FATAL_ERROR "cargo not found: install Rust (https://rustup.rs), see README.md")
 endif()
 
+# A toolchain file for cross-compiling sets the matching Rust target
+# (cmake/toolchain-aarch64-linux-gnu.cmake); empty builds for the host.
+# Not set(CACHE) over a toolchain file's variable: before policy CMP0126 that
+# would remove it.
+if ( NOT DEFINED CTRLEXCEL_RUST_TARGET )
+  set(CTRLEXCEL_RUST_TARGET "" CACHE STRING "Rust target triple of the library (empty: the host)")
+endif()
+
 set(CTRLEXCEL_RUST_DIR ${PROJECT_SOURCE_DIR}/rust)
 set(CTRLEXCEL_CARGO_TARGET_DIR ${PROJECT_BINARY_DIR}/cargo)
-if ( MSVC )
-  set(CTRLEXCEL_RUST_LIB ${CTRLEXCEL_CARGO_TARGET_DIR}/release/ctrlexcel_xlsx.lib)
+if ( CTRLEXCEL_RUST_TARGET )
+  set(CTRLEXCEL_CARGO_TARGET_ARGS --target ${CTRLEXCEL_RUST_TARGET})
+  set(CTRLEXCEL_CARGO_OUT_DIR ${CTRLEXCEL_CARGO_TARGET_DIR}/${CTRLEXCEL_RUST_TARGET}/release)
 else()
-  set(CTRLEXCEL_RUST_LIB ${CTRLEXCEL_CARGO_TARGET_DIR}/release/libctrlexcel_xlsx.a)
+  set(CTRLEXCEL_CARGO_TARGET_ARGS)
+  set(CTRLEXCEL_CARGO_OUT_DIR ${CTRLEXCEL_CARGO_TARGET_DIR}/release)
+endif()
+if ( MSVC )
+  set(CTRLEXCEL_RUST_LIB ${CTRLEXCEL_CARGO_OUT_DIR}/ctrlexcel_xlsx.lib)
+else()
+  set(CTRLEXCEL_RUST_LIB ${CTRLEXCEL_CARGO_OUT_DIR}/libctrlexcel_xlsx.a)
 endif()
 
 file(GLOB_RECURSE CTRLEXCEL_RUST_SOURCES CONFIGURE_DEPENDS ${CTRLEXCEL_RUST_DIR}/src/*.rs)
 add_custom_command(
   OUTPUT ${CTRLEXCEL_RUST_LIB}
   COMMAND ${CMAKE_COMMAND} -E env CARGO_TARGET_DIR=${CTRLEXCEL_CARGO_TARGET_DIR}
-          ${CARGO_EXECUTABLE} build --release --locked --lib
+          ${CARGO_EXECUTABLE} build --release --locked --lib ${CTRLEXCEL_CARGO_TARGET_ARGS}
   WORKING_DIRECTORY ${CTRLEXCEL_RUST_DIR}
   DEPENDS ${CTRLEXCEL_RUST_SOURCES}
           ${CTRLEXCEL_RUST_DIR}/Cargo.toml
