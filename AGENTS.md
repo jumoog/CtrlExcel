@@ -21,6 +21,7 @@ A WinCC OA CTRL extension (`CtrlExcelReader`) that reads and writes `.xlsx` file
 | `docker/` | Image on top of a WinCC OA image (Debian from Siemens, or RHEL from `docker/winccoa-rhel/Dockerfile`) that builds the extension and runs every test suite on Linux (`run-tests.sh`); the Dockerfile supports both package managers |
 | `CMakeLists.txt`, `cmake/RustLibrary.cmake`, `CMakePresets.json`, `.github/workflows/ci.yml` | Build (CMake runs cargo), CI; the version is in `CMakeLists.txt` (`project(... VERSION)`) only |
 | `VersInfo.rc`, `cmake/VersionInfo.cmake` | Windows version resource; the script regenerates `CtrlExcelVersion.h` on every build with the git revision, so `ProductVersion` is e.g. `2.0.0+a5f43da` (`-dirty` and `PrivateBuild` for uncommitted changes) |
+| `tools/package_release.py` | Packs the release zips (WinCC OA project layout) and `SHA256SUMS.txt`; see *Releasing* |
 | `rust/third_party_licenses.py` | Regenerates `THIRD-PARTY-LICENSES.txt` from `rust/Cargo.lock`; run it after dependency changes |
 | `.github/dependabot.yml` | Weekly updates of the crates (`rust/Cargo.lock`, one grouped PR), the toolchain (`rust/rust-toolchain.toml`, which docker/ follows) and the GitHub Actions. Before merging a crate update, regenerate `THIRD-PARTY-LICENSES.txt` and run the CTRL tests (CI cannot) |
 
@@ -86,6 +87,30 @@ CTRL `time` cannot go below 1970-01-01 UTC (`makeTime` returns time 0, arithmeti
 - Match the surrounding file: `ExcelExternHdl.cxx` uses `if ( cond )` with inner spaces; `ExcelXlsxHelpers.cxx` uses `if (cond)`. Two-space indent, braces on their own line. Rust: `cargo fmt` style.
 - Comments explain *why* (library quirks, invariants), not what.
 - Update `README.md` when user-visible behaviour changes.
+
+## Releasing
+
+A release is one zip per platform (Windows x64, Linux Debian 12, Linux RHEL 10), laid out like a WinCC OA project, plus `SHA256SUMS.txt`, attached to a GitHub release. Every library in a zip must be the exact file that passed the CTRL tests. No debug files (`.pdb`, `.debug`).
+
+1. **Version.** Set `project(CtrlExcelReader VERSION x.y.z)` in `CMakeLists.txt` (major for behaviour changes scripts may notice, minor for features, patch for fixes). `THIRD-PARTY-LICENSES.txt` must match `rust/Cargo.lock` (`python rust/third_party_licenses.py`; CI warns otherwise). Commit `build: version x.y.z`, tag it (`git tag -a vx.y.z -m "CtrlExcelReader x.y.z"`) and push `main` and the tag. Build everything from that clean tree: the DLL's `ProductVersion` must be `x.y.z+<commit>` without `-dirty`.
+2. **Windows.** `cmake --build --preset relwithdebinfo`, `ctest --test-dir build -C RelWithDebInfo`, and check `(Get-Item build/RelWithDebInfo/CtrlExcelReader.dll).VersionInfo.ProductVersion`. Copy the DLL into the project's `bin/` and run both CTRL suites (`WCCOActrl -proj <project> -n -log +stderr ExcelRoundTripTest.ctl`, then `ExcelWorkbookTest.ctl`). A running project locks the DLL (the copy fails with "busy"): ask the user to stop it instead of testing the old file.
+3. **Linux.** Run the build-and-test image for each distribution (README, *Build and test on Linux in Docker*): `ctrlexcel-build` with the volume `ctrlexcel-build` for Debian 12, `ctrlexcel-build-rhel` with `ctrlexcel-build-rhel` for RHEL 10. Then, in the same image and volume, strip the library and test the stripped file, which is the one released. This needs that full run first: it uses the library and the test project (`/build/cmake`, `/build/proj`) the run leaves in the volume.
+
+   ```sh
+   docker run --rm --entrypoint bash -v ctrlexcel-build:/build -v "$OUT/debian12:/out" ctrlexcel-build -c '
+     set -e; test -d /build/proj || { echo "run the build-and-test image first" >&2; exit 1; }
+     objcopy --strip-debug /build/cmake/CtrlExcelReader.so /out/CtrlExcelReader.so
+     cp /out/CtrlExcelReader.so /build/proj/bin/ && cd /build
+     for t in ExcelRoundTripTest ExcelWorkbookTest; do
+       /opt/WinCC_OA/3.21/bin/WCCOActrl -config /build/proj/config/config -autofreg -n -log +stderr $t.ctl 2>&1 | grep summary
+     done
+     nm -D --defined-only /out/CtrlExcelReader.so | grep " T "
+     objdump -T /out/CtrlExcelReader.so | grep -o "GLIBC_[0-9.]*" | sort -uV | tail -1'
+   ```
+
+   (RHEL: `ctrlexcel-build-rhel`, volume `ctrlexcel-build-rhel`, `$OUT/rhel10`; on Git Bash for Windows prefix `MSYS_NO_PATHCONV=1`.) Both summaries must say `ALL PASSED`, the only exports are `newExternHdl` and `getVersionString`, and the glibc is 2.34 (Debian 12) or 2.39 (RHEL 10).
+4. **Package.** On the tagged commit (the script checks that HEAD is `vx.y.z` and that the files it packs from the tree are unchanged, and dates the zip entries with the commit's date): `python tools/package_release.py <out> --windows build/RelWithDebInfo/CtrlExcelReader.dll --debian12 <out>/debian12/CtrlExcelReader.so --rhel10 <out>/rhel10/CtrlExcelReader.so` writes `CtrlExcelReader-x.y.z-Windows-x64.zip`, `-Linux-Debian12-x64.zip`, `-Linux-RHEL10-x64.zip` and `SHA256SUMS.txt`. Each zip holds `bin/CtrlExcelReader.dll` or `.so` (mode 755), `scripts/libs/classes/ExcelWorkbook.ctl` and `doc/CtrlExcelReader/` (README, LICENSE, THIRD-PARTY-LICENSES.txt; not the project root, where it would overwrite a project's own README).
+5. **Publish.** `gh release create vx.y.z --title "CtrlExcelReader x.y.z" --notes-file <notes> --verify-tag <the three zips> <out>/SHA256SUMS.txt`. The notes list the changes since the previous release (behaviour changes separately), a table of the downloads with the glibc each Linux build needs, how to install (unpack into the project directory, restart the CTRL managers, `#uses "CtrlExcelReader"`), what was tested where, and the DLL's `ProductVersion`. A published release is public: ask before replacing or deleting its assets.
 
 ## Git
 
