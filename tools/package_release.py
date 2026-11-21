@@ -7,6 +7,7 @@ is not overwritten), plus SHA256SUMS.txt. See AGENTS.md, "Releasing".
         [--windows build/RelWithDebInfo/CtrlExcelReader.dll]
         [--debian12 path/to/stripped/CtrlExcelReader.so]
         [--rhel10 path/to/stripped/CtrlExcelReader.so]
+        [--debian12-arm64 path/to/stripped/CtrlExcelReader.so]
 
 The version comes from CMakeLists.txt (project(... VERSION)). Pass the
 exact library files that were tested; the Linux ones stripped of debug info.
@@ -36,6 +37,7 @@ PLATFORMS = {
     'windows': ('Windows-x64', 'bin/CtrlExcelReader.dll'),
     'debian12': ('Linux-Debian12-x64', 'bin/CtrlExcelReader.so'),
     'rhel10': ('Linux-RHEL10-x64', 'bin/CtrlExcelReader.so'),
+    'debian12-arm64': ('Linux-Debian12-arm64', 'bin/CtrlExcelReader.so'),
 }
 
 
@@ -93,7 +95,7 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     sums = []
     for option, (platform, library_name) in PLATFORMS.items():
-        library = getattr(args, option)
+        library = getattr(args, option.replace('-', '_'))
         if not library:
             continue
         zip_name = f'CtrlExcelReader-{ver}-{platform}.zip'
@@ -106,7 +108,7 @@ def main():
             sums.append(f'{hashlib.sha256(f.read()).hexdigest()}  {zip_name}')
         print(f'{zip_name}: {os.path.getsize(path)} bytes')
     if not sums:
-        raise SystemExit('no library given (--windows, --debian12, --rhel10)')
+        raise SystemExit('no library given (' + ', '.join('--' + option for option in PLATFORMS) + ')')
     with open(os.path.join(args.out_dir, 'SHA256SUMS.txt'), 'w', encoding='ascii', newline='\n') as f:
         f.write('\n'.join(sums) + '\n')
 
